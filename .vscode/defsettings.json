@@ -1,0 +1,12 @@
+{
+    "deckip"    : "10.153.27.169",
+    "deckport"  : "22",
+    "deckuser"  : "deck",
+    "deckpass"  : "6",
+    "deckkey"   : "-i ${env:HOME}/.ssh/id_rsa",
+    "deckdir"   : "/home/deck",
+    "pluginname": "decky-clarifydeck",
+    "python.analysis.extraPaths": [
+        "./py_modules"
+    ]
+}
