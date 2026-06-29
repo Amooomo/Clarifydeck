@@ -1,11 +1,18 @@
 {
-  "name": "decky-clarifydeck",
+  "name": "ClarifyDeck",
   "author": "zeno",
-  "flags": ["debug", "_root"],
+  "flags": [
+    "debug",
+    "_root"
+  ],
   "api_version": 1,
   "publish": {
-    "tags": ["template", "root"],
-    "description": "Decky example plugin.",
+    "tags": [
+      "ocr",
+      "overlay",
+      "accessibility"
+    ],
+    "description": "OCR small in-game text and render high-readability overlay captions on Steam Deck.",
     "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
   }
 }

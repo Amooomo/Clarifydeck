@@ -1,0 +1,12 @@
+name: clarifydeck
+channels:
+  - https://mirrors.ustc.edu.cn/anaconda/cloud/conda-forge
+  - https://mirrors.ustc.edu.cn/anaconda/pkgs/main
+  - https://mirrors.ustc.edu.cn/anaconda/pkgs/r
+  - nodefaults
+dependencies:
+  - python=3.11
+  - nodejs=22
+  - pnpm
+  - pillow
+  - tesseract
