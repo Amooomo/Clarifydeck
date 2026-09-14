@@ -3,6 +3,7 @@ import {
   ButtonItem,
   PanelSection,
   PanelSectionRow,
+  findModule,
   staticClasses,
 } from "@decky/ui";
 import {
@@ -10,11 +11,12 @@ import {
   callable,
   definePlugin,
   removeEventListener,
+  routerHook,
   toaster,
+  useQuickAccessVisible,
 } from "@decky/api";
-import { type CSSProperties, useEffect, useMemo, useState } from "react";
+import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { FaSearchPlus } from "react-icons/fa";
-import { createPortal } from "react-dom";
 
 type BoxState = {
   id: string;
@@ -41,12 +43,30 @@ type BackendStatus = {
   last_capture_at: number;
   last_ocr_at: number;
   ocr_lang: string;
+  ocr_scale?: number;
+  ocr_invert?: boolean;
+  ocr_psm?: number;
   mse_threshold: number;
   tesseract: string;
   tessdata?: string;
+  ocr_langs?: string[];
   screen_width: number;
   screen_height: number;
+  frame_cached?: boolean;
 };
+
+type OcrTestResult = {
+  text: string | null;
+  error: string;
+  crop_path?: string | null;
+};
+
+const LANGUAGES = [
+  { value: "chi_sim+eng", label: "中英 chi_sim+eng" },
+  { value: "chi_sim", label: "简体 chi_sim" },
+  { value: "chi_tra", label: "繁体 chi_tra" },
+  { value: "eng", label: "英文 eng" },
+];
 
 const listBoxes = callable<[], BoxState[]>("list_boxes");
 const addBox = callable<[], BoxState>("add_box");
@@ -58,9 +78,226 @@ const removeBox = callable<[boxId: string], boolean>("remove_box");
 const startPlugin = callable<[], BackendStatus>("start_plugin");
 const stopPlugin = callable<[], BackendStatus>("stop_plugin");
 const getStatus = callable<[], BackendStatus>("get_status");
+const setOcrLang = callable<[lang: string], BackendStatus>("set_ocr_lang");
+const setOcrOptions = callable<
+  [invert: boolean, psm: number, scale: number],
+  BackendStatus
+>("set_ocr_options");
+const runOcrNow = callable<[boxId: string], OcrTestResult | null>("run_ocr_now");
 
 let globalSelectedBoxId: string | undefined;
 const selectionEvents = new EventTarget();
+
+let overlayMounted = false;
+let overlayMountMethod = "none";
+let overlayBoxCount = 0;
+const overlayEvents = new EventTarget();
+
+function setOverlayMounted(value: boolean, boxCount = 0) {
+  overlayMounted = value;
+  overlayBoxCount = boxCount;
+  overlayEvents.dispatchEvent(new Event("clarifydeck-overlay"));
+}
+
+function useOverlayMounted() {
+  const [state, setState] = useState({
+    mounted: overlayMounted,
+    method: overlayMountMethod,
+    boxes: overlayBoxCount,
+  });
+  useEffect(() => {
+    const handler = () =>
+      setState({ mounted: overlayMounted, method: overlayMountMethod, boxes: overlayBoxCount });
+    overlayEvents.addEventListener("clarifydeck-overlay", handler);
+    return () => overlayEvents.removeEventListener("clarifydeck-overlay", handler);
+  }, []);
+  return state;
+}
+
+type SubtitleColor = "white" | "black";
+let globalTextColor: SubtitleColor = "white";
+let globalFontSize = 24;
+let globalToastEnabled = false;
+const settingsEvents = new EventTarget();
+
+function setGlobalTextColor(color: SubtitleColor) {
+  globalTextColor = color;
+  settingsEvents.dispatchEvent(new Event("clarifydeck-settings"));
+}
+
+function setGlobalFontSize(size: number) {
+  globalFontSize = Math.max(12, Math.min(64, Math.round(size)));
+  settingsEvents.dispatchEvent(new Event("clarifydeck-settings"));
+}
+
+function setGlobalToastEnabled(enabled: boolean) {
+  globalToastEnabled = enabled;
+  settingsEvents.dispatchEvent(new Event("clarifydeck-settings"));
+}
+
+function useTextColor() {
+  const [color, setColor] = useState<SubtitleColor>(globalTextColor);
+  useEffect(() => {
+    const handler = () => setColor(globalTextColor);
+    settingsEvents.addEventListener("clarifydeck-settings", handler);
+    return () => settingsEvents.removeEventListener("clarifydeck-settings", handler);
+  }, []);
+  return color;
+}
+
+function useFontSize() {
+  const [size, setSize] = useState(globalFontSize);
+  useEffect(() => {
+    const handler = () => setSize(globalFontSize);
+    settingsEvents.addEventListener("clarifydeck-settings", handler);
+    return () => settingsEvents.removeEventListener("clarifydeck-settings", handler);
+  }, []);
+  return size;
+}
+
+function useToastEnabled() {
+  const [enabled, setEnabled] = useState(globalToastEnabled);
+  useEffect(() => {
+    const handler = () => setEnabled(globalToastEnabled);
+    settingsEvents.addEventListener("clarifydeck-settings", handler);
+    return () => settingsEvents.removeEventListener("clarifydeck-settings", handler);
+  }, []);
+  return enabled;
+}
+
+let globalOverlayViewport = { w: 0, h: 0 };
+const viewportEvents = new EventTarget();
+
+function setGlobalOverlayViewport(w: number, h: number) {
+  globalOverlayViewport = { w, h };
+  viewportEvents.dispatchEvent(new Event("clarifydeck-viewport"));
+}
+
+function useOverlayViewport() {
+  const [viewport, setViewport] = useState(globalOverlayViewport);
+  useEffect(() => {
+    const handler = () => setViewport(globalOverlayViewport);
+    viewportEvents.addEventListener("clarifydeck-viewport", handler);
+    return () => viewportEvents.removeEventListener("clarifydeck-viewport", handler);
+  }, []);
+  return viewport;
+}
+
+function mountOverlayKeepAlive(): () => void {
+  let current: { dismiss: () => void } | null = null;
+  const ping = () => {
+    if (!globalToastEnabled) {
+      return;
+    }
+    try {
+      current?.dismiss();
+    } catch (error) {
+      console.warn("ClarifyDeck keep-alive dismiss failed", error);
+    }
+    try {
+      current = toaster.toast({
+        title: "ClarifyDeck",
+        body: " ",
+        showToast: false,
+        playSound: false,
+        showNewIndicator: false,
+        sound: 0,
+        duration: 12000,
+      });
+    } catch (error) {
+      console.warn("ClarifyDeck keep-alive toast failed", error);
+    }
+  };
+  const id = window.setInterval(ping, 10000);
+  ping();
+  return () => {
+    window.clearInterval(id);
+    try {
+      current?.dismiss();
+    } catch (error) {
+      console.warn("ClarifyDeck keep-alive cleanup failed", error);
+    }
+  };
+}
+
+type ReactRootLike = { render: (node: ReactNode) => void; unmount: () => void };
+type CreateRootFn = (element: Element) => ReactRootLike;
+
+function resolveCreateRoot(): CreateRootFn | undefined {
+  const reactDom = (
+    window as unknown as {
+      SP_REACTDOM?: {
+        createRoot?: CreateRootFn;
+        render?: (node: ReactNode, element: Element) => void;
+        unmountComponentAtNode?: (element: Element) => void;
+      };
+    }
+  ).SP_REACTDOM;
+  if (typeof reactDom?.createRoot === "function") {
+    return reactDom.createRoot.bind(reactDom) as CreateRootFn;
+  }
+  try {
+    const client = findModule(
+      (module: { createRoot?: unknown; hydrateRoot?: unknown }) =>
+        typeof module?.createRoot === "function" && typeof module?.hydrateRoot === "function",
+    ) as { createRoot?: CreateRootFn } | undefined;
+    if (typeof client?.createRoot === "function") {
+      console.log("ClarifyDeck using react-dom/client createRoot");
+      return client.createRoot.bind(client) as CreateRootFn;
+    }
+  } catch (error) {
+    console.warn("ClarifyDeck createRoot lookup failed", error);
+  }
+  if (reactDom?.render && reactDom?.unmountComponentAtNode) {
+    return (element: Element) => ({
+      render: (node: ReactNode) => reactDom.render?.(node, element),
+      unmount: () => reactDom.unmountComponentAtNode?.(element),
+    });
+  }
+  return undefined;
+}
+
+function mountOverlay(): () => void {
+  const createRoot = resolveCreateRoot();
+  if (createRoot) {
+    const container = document.createElement("div");
+    container.id = "clarifydeck-overlay-root";
+    container.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483647;";
+    document.body.appendChild(container);
+
+    const rawProbe = document.createElement("div");
+    rawProbe.textContent = "CD raw";
+    rawProbe.style.cssText =
+      "position:fixed;top:60px;left:8px;z-index:2147483647;background:#00ff88;color:#000;" +
+      "padding:4px 8px;font:900 14px sans-serif;";
+    document.body.appendChild(rawProbe);
+
+    const root = createRoot(container);
+    root.render(<Overlay />);
+    overlayMountMethod = "createRoot";
+    const keepAlive = window.setInterval(() => {
+      if (!container.isConnected) {
+        document.body.appendChild(container);
+      }
+      if (!rawProbe.isConnected) {
+        document.body.appendChild(rawProbe);
+      }
+    }, 1000);
+    return () => {
+      window.clearInterval(keepAlive);
+      try {
+        root.unmount();
+      } catch (error) {
+        console.warn("ClarifyDeck overlay unmount failed", error);
+      }
+      container.remove();
+      rawProbe.remove();
+    };
+  }
+  overlayMountMethod = "routerHook";
+  routerHook.addGlobalComponent("ClarifyDeckOverlay", Overlay);
+  return () => routerHook.removeGlobalComponent("ClarifyDeckOverlay");
+}
 
 function setGlobalSelectedBoxId(boxId: string | undefined) {
   globalSelectedBoxId = boxId;
@@ -150,6 +387,11 @@ function Content() {
   );
   const sliderMaxWidth = status?.screen_width ?? 1920;
   const sliderMaxHeight = status?.screen_height ?? 1200;
+  const overlayState = useOverlayMounted();
+  const overlayViewport = useOverlayViewport();
+  const textColor = useTextColor();
+  const fontSize = useFontSize();
+  const toastEnabled = useToastEnabled();
 
   useEffect(() => {
     if (boxes.length === 0) {
@@ -203,6 +445,57 @@ function Content() {
     }
   };
 
+  const changeLang = async (lang: string) => {
+    try {
+      const nextStatus = await setOcrLang(lang);
+      toaster.toast({ title: "ClarifyDeck", body: `OCR language: ${nextStatus.ocr_lang}` });
+      await refresh();
+    } catch (error) {
+      console.warn("ClarifyDeck failed to set OCR language", error);
+      toaster.toast({ title: "ClarifyDeck", body: "Failed to set OCR language" });
+    }
+  };
+
+  const applyOcrOptions = async (overrides: { invert?: boolean; psm?: number; scale?: number }) => {
+    const invert = overrides.invert ?? status?.ocr_invert ?? false;
+    const psm = overrides.psm ?? status?.ocr_psm ?? 6;
+    const scale = overrides.scale ?? status?.ocr_scale ?? 2;
+    try {
+      await setOcrOptions(invert, psm, scale);
+      await refresh();
+    } catch (error) {
+      console.warn("ClarifyDeck failed to set OCR options", error);
+      toaster.toast({ title: "ClarifyDeck", body: "Failed to set OCR options" });
+    }
+  };
+
+  const testOcr = async () => {
+    if (!selectedBox) {
+      return;
+    }
+    try {
+      const result = await runOcrNow(selectedBox.id);
+      const body = result?.text
+        ? result.text.slice(0, 120)
+        : result?.error
+          ? `OCR error: ${result.error.slice(0, 100)}`
+          : "OCR returned empty text";
+      const cropNote = result?.crop_path ? `\ncrop: ${result.crop_path}` : "";
+      toaster.toast({ title: "ClarifyDeck OCR", body: `${body}${cropNote}` });
+      await refresh();
+    } catch (error) {
+      console.warn("ClarifyDeck test OCR failed", error);
+      toaster.toast({ title: "ClarifyDeck OCR", body: "Test OCR failed" });
+    }
+  };
+
+  const captureAge = status?.last_capture_at
+    ? Math.max(0, Math.round(Date.now() / 1000 - status.last_capture_at))
+    : -1;
+  const ocrAge = status?.last_ocr_at
+    ? Math.max(0, Math.round(Date.now() / 1000 - status.last_ocr_at))
+    : -1;
+
   const updateSelectedBox = (field: keyof Pick<BoxState, "x" | "y" | "w" | "h">, value: number) => {
     if (!selectedBox) {
       return;
@@ -241,10 +534,111 @@ function Content() {
           <div>Backend: {status?.capture_running ? "running" : "stopped"}</div>
           <div>Regions: {status?.box_count ?? boxes.length}</div>
           <div>OCR: {status?.tesseract ? "Tesseract found" : "waiting for Tesseract"}</div>
+          <div>Langs: {status?.ocr_langs?.join(", ") ?? "-"}</div>
+          <div>
+            Lang: {status?.ocr_lang ?? "-"} | x{status?.ocr_scale ?? 1} | PSM{" "}
+            {status?.ocr_psm ?? 6} | {status?.ocr_invert ? "invert" : "normal"}
+          </div>
+          <div>Frame: {status?.frame_cached ? "captured" : "none"}{captureAge >= 0 ? ` (${captureAge}s ago)` : ""}</div>
+          <div>Last OCR: {ocrAge >= 0 ? `${ocrAge}s ago` : "never"}</div>
+          <div>Overlay: {overlayState.mounted ? `mounted (${overlayState.method}, ${overlayState.boxes} boxes)` : "NOT mounted"}</div>
           <div>Canvas: {sliderMaxWidth}x{sliderMaxHeight}</div>
+          <div>
+            Overlay viewport: {overlayViewport.w.toFixed(0)}x{overlayViewport.h.toFixed(0)}{" "}
+            dpr{window.devicePixelRatio}
+          </div>
+          <div>
+            Scale: {(overlayViewport.w / sliderMaxWidth).toFixed(3)}x
+            {(overlayViewport.h / sliderMaxHeight).toFixed(3)}
+          </div>
           {status?.last_error ? <div style={errorStyle}>{status.last_error}</div> : null}
         </div>
       </PanelSectionRow>
+
+      <PanelSectionRow>
+        <ButtonItem layout="below" onClick={testOcr}>
+          Test OCR now (selected region)
+        </ButtonItem>
+      </PanelSectionRow>
+
+      <PanelSection title="OCR language">
+        <PanelSectionRow>
+          <div style={rowActionsStyle}>
+            {LANGUAGES.map((lang) => (
+              <ButtonItem key={lang.value} layout="below" onClick={() => changeLang(lang.value)}>
+                {status?.ocr_lang === lang.value ? `[x] ${lang.label}` : `[ ] ${lang.label}`}
+              </ButtonItem>
+            ))}
+          </div>
+        </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title="OCR tuning">
+        <PanelSectionRow>
+          <div style={rowActionsStyle}>
+            <ButtonItem
+              layout="below"
+              onClick={() => applyOcrOptions({ invert: !(status?.ocr_invert ?? false) })}
+            >
+              {status?.ocr_invert ? "[x] Invert" : "[ ] Invert"}
+            </ButtonItem>
+            {[6, 4, 3, 11].map((option) => (
+              <ButtonItem key={option} layout="below" onClick={() => applyOcrOptions({ psm: option })}>
+                {status?.ocr_psm === option ? `[x] PSM ${option}` : `[ ] PSM ${option}`}
+              </ButtonItem>
+            ))}
+            {[1, 2, 3].map((option) => (
+              <ButtonItem key={option} layout="below" onClick={() => applyOcrOptions({ scale: option })}>
+                {status?.ocr_scale === option ? `[x] x${option}` : `[ ] x${option}`}
+              </ButtonItem>
+            ))}
+          </div>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <div style={hintStyle}>
+            Use "Test OCR now" after each change to compare. PSM 6 = block, 4 = column,
+            3 = auto, 11 = sparse. Invert for dark text on light background.
+          </div>
+        </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title="Subtitle color">
+        <PanelSectionRow>
+          <div style={rowActionsStyle}>
+            <ButtonItem layout="below" onClick={() => setGlobalTextColor("white")}>
+              {textColor === "white" ? "[x] White text" : "[ ] White text"}
+            </ButtonItem>
+            <ButtonItem layout="below" onClick={() => setGlobalTextColor("black")}>
+              {textColor === "black" ? "[x] Black text" : "[ ] Black text"}
+            </ButtonItem>
+          </div>
+        </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title={`Subtitle size: ${fontSize}px`}>
+        <CoordinateSlider
+          label="Px"
+          min={12}
+          max={64}
+          value={fontSize}
+          onChange={(value) => setGlobalFontSize(value)}
+        />
+      </PanelSection>
+
+      <PanelSection title="In-game overlay">
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={() => setGlobalToastEnabled(!toastEnabled)}>
+            {toastEnabled ? "[x] Keep overlay visible" : "[ ] Keep overlay visible"}
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <div style={hintStyle}>
+            The Steam UI layer is only composited over a game while a notification is
+            active. Enabling this keeps a silent background notification alive so the
+            overlay box stays on screen while playing.
+          </div>
+        </PanelSectionRow>
+      </PanelSection>
 
       <PanelSection title="Regions">
         {boxes.length === 0 ? (
@@ -301,42 +695,93 @@ function CoordinateSlider({ label, min, max, value, onChange }: CoordinateSlider
   );
 }
 
+function useCaptureScale() {
+  const [capture, setCapture] = useState({ w: 1280, h: 800 });
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      try {
+        const fresh = await getStatus();
+        if (active) {
+          setCapture({ w: fresh.screen_width || 1280, h: fresh.screen_height || 800 });
+        }
+      } catch (error) {
+        console.warn("ClarifyDeck capture scale lookup failed", error);
+      }
+    };
+    void load();
+    const id = window.setInterval(load, 3000);
+    return () => {
+      active = false;
+      window.clearInterval(id);
+    };
+  }, []);
+  return capture;
+}
+
 function Overlay() {
   const { boxes } = useClarifyDeckState({ pollStatus: false });
   const selectedBoxId = useSelectedBoxId();
-
-  // 用于动态捕获 Steam 真实游戏画面的根节点，逃离 QAM 的 Transform 牢笼
-  const [portalTarget, setPortalTarget] = useState<Element | null>(null);
+  const qamVisible = useQuickAccessVisible();
+  const textColor = useTextColor();
+  const fontSize = useFontSize();
+  const capture = useCaptureScale();
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [viewport, setViewport] = useState({ w: 1280, h: 800 });
 
   useEffect(() => {
-    const target = document.querySelector('.app') || document.body;
-    setPortalTarget(target);
+    const measure = () => {
+      const rect = rootRef.current?.getBoundingClientRect();
+      if (rect && rect.width > 2 && rect.height > 2) {
+        setViewport({ w: rect.width, h: rect.height });
+        setGlobalOverlayViewport(rect.width, rect.height);
+      }
+    };
+    measure();
+    const id = window.setInterval(measure, 2000);
+    return () => window.clearInterval(id);
   }, []);
 
-  if (!portalTarget) return null;
+  useEffect(() => {
+    setOverlayMounted(true, boxes.length);
+    return () => setOverlayMounted(false, 0);
+  }, [boxes.length]);
 
-  return createPortal(
-    <div style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0, zIndex: 2147483647, pointerEvents: "none", overflow: "visible" }}>
-      {boxes.map((box, index) => {
-        const selected = box.id === selectedBoxId || (!selectedBoxId && index === 0);
-        return (
-          <div
-            key={`region-${box.id}`}
-            style={{
-              ...regionBoxStyle,
-              ...(selected ? selectedRegionBoxStyle : idleRegionBoxStyle),
-              left: box.x,
-              top: box.y,
-              width: box.w,
-              height: box.h,
-            }}
-          >
-            <div style={regionLabelStyle}>
-              {selected ? "SELECTED" : `REGION ${index + 1}`} | X {box.x} | Y {box.y} | W {box.w} | H {box.h}
-            </div>
-          </div>
-        );
-      })}
+  const sx = capture.w ? viewport.w / capture.w : 1;
+  const sy = capture.h ? viewport.h / capture.h : 1;
+  const subtitleBackground =
+    textColor === "white" ? "rgba(0, 0, 0, 0.55)" : "rgba(255, 255, 255, 0.55)";
+
+  return (
+    <div ref={rootRef} style={overlayRootStyle}>
+      <div style={overlayProbeStyle}>CD probe {boxes.length}</div>
+      {qamVisible ? <div style={overlayBadgeStyle}>CD overlay: {boxes.length}</div> : null}
+
+      {qamVisible
+        ? boxes.map((box, index) => {
+            const selected = box.id === selectedBoxId || (!selectedBoxId && index === 0);
+            if (!selected) {
+              return null;
+            }
+            return (
+              <div
+                key={`region-${box.id}`}
+                style={{
+                  ...regionBoxStyle,
+                  ...selectedRegionBoxStyle,
+                  left: box.x * sx,
+                  top: box.y * sy,
+                  width: box.w * sx,
+                  height: box.h * sy,
+                }}
+              >
+                <div style={regionLabelStyle}>
+                  X {box.x} | Y {box.y} | {box.w}x{box.h}
+                </div>
+              </div>
+            );
+          })
+        : null}
 
       {boxes
         .filter((box) => box.text.trim().length > 0)
@@ -345,17 +790,19 @@ function Overlay() {
             key={`subtitle-${box.id}`}
             style={{
               ...subtitleBoxStyle,
-              left: box.x,
-              top: box.y,
-              width: box.w,
-              minHeight: box.h,
+              background: subtitleBackground,
+              color: textColor,
+              fontSize,
+              left: box.x * sx,
+              top: box.y * sy,
+              width: box.w * sx,
+              height: box.h * sy,
             }}
           >
             {box.text}
           </div>
         ))}
-    </div>,
-    portalTarget
+    </div>
   );
 }
 
@@ -412,11 +859,35 @@ const sliderValueStyle: CSSProperties = {
 const overlayRootStyle: CSSProperties = {
   height: "100%",
   left: 0,
+  overflow: "visible",
   pointerEvents: "none",
   position: "fixed",
   top: 0,
   width: "100%",
-  zIndex: 99999,
+  zIndex: 2147483000,
+};
+
+const overlayBadgeStyle: CSSProperties = {
+  background: "rgba(255, 0, 128, 0.85)",
+  borderRadius: "4px",
+  color: "#ffffff",
+  fontSize: "12px",
+  left: 4,
+  padding: "2px 6px",
+  position: "absolute",
+  top: 4,
+};
+
+const overlayProbeStyle: CSSProperties = {
+  background: "#ff00aa",
+  border: "2px solid #ffffff",
+  color: "#ffffff",
+  fontSize: "14px",
+  fontWeight: 900,
+  left: 8,
+  padding: "4px 8px",
+  position: "absolute",
+  top: 8,
 };
 
 const regionBoxStyle: CSSProperties = {
@@ -429,11 +900,6 @@ const regionBoxStyle: CSSProperties = {
 const selectedRegionBoxStyle: CSSProperties = {
   border: "3px solid rgba(255, 214, 10, 0.98)",
   boxShadow: "0 0 0 2px rgba(0, 0, 0, 0.9), 0 0 18px rgba(255, 214, 10, 0.85)",
-};
-
-const idleRegionBoxStyle: CSSProperties = {
-  border: "2px dashed rgba(0, 229, 255, 0.82)",
-  boxShadow: "0 0 0 1px rgba(0, 0, 0, 0.75)",
 };
 
 const regionLabelStyle: CSSProperties = {
@@ -454,37 +920,41 @@ const regionLabelStyle: CSSProperties = {
 };
 
 const subtitleBoxStyle: CSSProperties = {
-  alignItems: "center",
   backdropFilter: "blur(6px)",
-  background: "rgba(0, 0, 0, 0.72)",
+  background: "rgba(0, 0, 0, 0.55)",
   border: "1px solid rgba(255, 255, 255, 0.22)",
   borderRadius: "10px",
   boxShadow: "0 10px 24px rgba(0, 0, 0, 0.35)",
   boxSizing: "border-box",
   color: "#ffffff",
-  display: "flex",
-  fontSize: "24px",
+  display: "block",
+  fontSize: 24,
   fontWeight: 700,
-  justifyContent: "center",
   lineHeight: 1.25,
-  overflow: "hidden",
+  overscrollBehavior: "contain",
+  overflowY: "auto",
   padding: "8px 12px",
+  pointerEvents: "auto",
   position: "absolute",
   textAlign: "center",
   textShadow: "0 2px 4px rgba(0, 0, 0, 0.85)",
+  touchAction: "pan-y",
   whiteSpace: "pre-wrap",
 };
 
 export default definePlugin(() => {
   console.log("ClarifyDeck initializing");
+  const disposeOverlay = mountOverlay();
+  const disposeToast = mountOverlayKeepAlive();
 
   return {
     name: "ClarifyDeck",
     titleView: <div className={staticClasses.Title}>ClarifyDeck</div>,
     content: <Content />,
     icon: <FaSearchPlus />,
-    alwaysRender: <Overlay />,
     onDismount() {
+      disposeOverlay();
+      disposeToast();
       console.log("ClarifyDeck unloaded");
     },
   };

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sys
+import tempfile
 import types
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,7 @@ sys.modules.setdefault(
     "decky",
     types.SimpleNamespace(
         logger=logging.getLogger("clarifydeck-smoke"),
-        DECKY_PLUGIN_RUNTIME_DIR=".",
+        DECKY_PLUGIN_RUNTIME_DIR=tempfile.gettempdir(),
         DECKY_PLUGIN_DIR=".",
         emit=emit,
     ),
@@ -29,58 +30,111 @@ sys.modules.setdefault(
 import main  # noqa: E402
 
 
+def make_ppm(width: int, height: int, value: int) -> bytes:
+    header = f"P6\n{width} {height}\n255\n".encode("ascii")
+    return header + bytes([value]) * (width * height * 3)
+
+
+def make_pam(width: int, height: int, rgba: list[int]) -> bytes:
+    header = (
+        f"P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 4\nMAXVAL 255\n"
+        "TUPLTYPE RGB_ALPHA\nENDHDR\n"
+    ).encode("ascii")
+    return header + bytes(rgba) * (width * height)
+
+
 async def run() -> None:
-    plugin = main.Plugin()
+    engine = main.get_engine()
+    engine.configure_runtime(Path(tempfile.mkdtemp(prefix="clarifydeck-smoke-")))
 
-    box = await plugin.add_box()
-    assert box["w"] == plugin.DEFAULT_BOX_WIDTH
-    assert box["h"] == plugin.DEFAULT_BOX_HEIGHT
+    box = await engine.add_box()
+    assert box["w"] == main.ClarifyDeckEngine.DEFAULT_BOX_WIDTH
+    assert box["h"] == main.ClarifyDeckEngine.DEFAULT_BOX_HEIGHT
 
-    updated = await plugin.update_box(box["id"], 1, 2, 33, 44)
+    updated = await engine.update_box(box["id"], 1, 2, 33, 44)
     assert updated is not None
-    assert updated["x"] == 1
-    assert updated["y"] == 2
-    assert updated["w"] == 33
-    assert updated["h"] == 44
+    assert (updated["x"], updated["y"], updated["w"], updated["h"]) == (1, 2, 33, 44)
 
-    status = await plugin.get_status()
-    assert status["screen_width"] == plugin.DEFAULT_SCREEN_WIDTH
-    assert status["screen_height"] == plugin.DEFAULT_SCREEN_HEIGHT
+    status = await engine.get_status()
+    assert status["box_count"] == 1
+    assert status["screen_width"] == main.ClarifyDeckEngine.DEFAULT_SCREEN_WIDTH
+    assert status["screen_height"] == main.ClarifyDeckEngine.DEFAULT_SCREEN_HEIGHT
 
-    boxes = await plugin.list_boxes()
-    assert len(boxes) == 1
-    assert boxes[0]["id"] == box["id"]
+    frame = main.RGBFrame.from_ppm(make_ppm(100, 80, 200))
+    assert (frame.width, frame.height) == (100, 80)
+    round_trip = main.RGBFrame.from_ppm(frame.to_ppm_bytes())
+    assert round_trip.data == frame.data
+    crop = frame.crop(1, 2, 33, 44)
+    assert crop is not None and (crop.width, crop.height) == (33, 44)
 
-    assert plugin._clean_ocr_text(" hello\r\n\x00 world \n\n\n") == "hello\nworld"
+    pam = main.RGBFrame.from_ppm(make_pam(10, 10, [10, 20, 30, 255]))
+    assert (pam.width, pam.height) == (10, 10)
+    assert pam.data[:3] == bytes([10, 20, 30])
 
-    if main.Image is not None:
-        frame = main.Image.new("RGB", (100, 80), color="white")
-        crop = plugin._crop_box(frame, main.BoxState(id="crop", x=1, y=2, w=33, h=44))
-        assert crop is not None
-        assert crop.size == (33, 44)
+    up = main.RGBFrame.from_ppm(make_ppm(2, 2, 7)).upscaled(2)
+    assert (up.width, up.height) == (4, 4)
+    assert up.data[:3] == bytes([7, 7, 7])
 
-        signature_a = plugin._make_signature(frame)
-        signature_b = plugin._make_signature(frame.copy())
-        assert plugin._mse(signature_a, signature_b) == 0
+    lang_status = await engine.set_ocr_lang("chi_sim")
+    assert lang_status["ocr_lang"] == "chi_sim"
+    await engine.set_ocr_lang("eng")
 
-        ocr_calls = 0
+    opts = await engine.set_ocr_options(invert=True, psm=4, scale=3)
+    assert opts["ocr_invert"] is True
+    assert opts["ocr_psm"] == 4
+    assert opts["ocr_scale"] == 3
+    await engine.set_ocr_options(invert=False, psm=6, scale=2)
 
-        async def fake_run_ocr(_image: Any) -> str:
-            nonlocal ocr_calls
-            ocr_calls += 1
-            return "Tiny text"
+    same_a = main.RGBFrame.from_ppm(make_ppm(100, 80, 10))
+    same_b = main.RGBFrame.from_ppm(make_ppm(100, 80, 10))
+    bright = main.RGBFrame.from_ppm(make_ppm(100, 80, 250))
+    assert engine._mse(same_a.signature(), same_b.signature()) == 0
+    assert engine._mse(same_a.signature(), bright.signature()) > engine._mse_threshold
 
-        plugin._run_ocr = fake_run_ocr  # type: ignore[method-assign]
-        await plugin._process_frame(frame)
-        await plugin._process_frame(frame)
-        assert ocr_calls == 1
-        ocr_events = [event for event in EMITTED if event[0] == "ocr_broadcast"]
-        assert len(ocr_events) == 1
-        assert ocr_events[0][1][0]["text"] == "Tiny text"
+    assert engine._clean_ocr_text(" hello\r\n\x00 world \n\n\n") == "hello\nworld"
+    assert engine._text_score("脉冲电池") == 12
+    assert engine._text_score("abc 123") == 6
+
+    engine.OCR_MIN_INTERVAL_SECONDS = 0
+    engine._snapshot_cache.clear()
+    calls = {"n": 0}
+
+    async def fake_ocr(_image: Any) -> str:
+        calls["n"] += 1
+        return f"text-{calls['n']}"
+
+    engine._run_ocr = fake_ocr  # type: ignore[method-assign]
+
+    white = main.RGBFrame.from_ppm(make_ppm(200, 120, 250))
+    dark = main.RGBFrame.from_ppm(make_ppm(200, 120, 5))
+    await engine._process_frame(white)
+    assert calls["n"] == 1, calls
+    await engine._process_frame(white)
+    assert calls["n"] == 1, calls
+    await engine._process_frame(dark)
+    assert calls["n"] == 2, calls
+
+    events = [event for event in EMITTED if event[0] == "ocr_broadcast"]
+    assert events and events[-1][1][0]["text"] == "text-2"
+
+    async def failing_ocr(_image: Any) -> None:
+        calls["n"] += 1
+        return None
+
+    engine._run_ocr = failing_ocr  # type: ignore[method-assign]
+    engine._snapshot_cache.clear()
+    before = calls["n"]
+    await engine._process_frame(main.RGBFrame.from_ppm(make_ppm(200, 120, 100)))
+    assert calls["n"] == before + 1
+    assert box["id"] not in engine._snapshot_cache
+
+    plugin = main.Plugin()
+    listed = await plugin.list_boxes()
+    assert len(listed) == 1 and listed[0]["id"] == box["id"]
 
     removed = await plugin.remove_box(box["id"])
     assert removed
-    assert await plugin.list_boxes() == []
+    assert await engine.list_boxes() == []
 
     print("ClarifyDeck backend smoke test passed")
 
