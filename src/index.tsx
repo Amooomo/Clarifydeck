@@ -35,6 +35,17 @@ type OcrBroadcast = {
   box?: BoxState;
 };
 
+type OverlayStatus = {
+  enabled: boolean;
+  state: string;
+  display: string;
+  socket: string | null;
+  renderer_pid: number | null;
+  connected: boolean;
+  visible: boolean;
+  last_error: string | null;
+};
+
 type BackendStatus = {
   enabled: boolean;
   box_count: number;
@@ -53,6 +64,8 @@ type BackendStatus = {
   screen_width: number;
   screen_height: number;
   frame_cached?: boolean;
+  overlay?: OverlayStatus | null;
+  backend?: { pid: number; role: string };
 };
 
 type OcrTestResult = {
@@ -60,6 +73,52 @@ type OcrTestResult = {
   error: string;
   crop_path?: string | null;
 };
+
+type RecognitionROI = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type RecognitionROIResult = {
+  ok: boolean;
+  app_id?: string | null;
+  source?: string;
+  roi?: RecognitionROI;
+  pixel?: { x: number; y: number; width: number; height: number };
+  frame?: { width: number; height: number };
+  config_path?: string;
+  config_error?: string | null;
+  error?: string;
+  detail?: string;
+};
+
+type RoiDraft = { x: number; y: number; width: number; height: number };
+
+const ROI_PRESETS: { label: string; roi: RoiDraft }[] = [
+  { label: "Bottom 20%", roi: { x: 8, y: 70, width: 84, height: 20 } },
+  { label: "Bottom 30%", roi: { x: 8, y: 62, width: 84, height: 32 } },
+  { label: "Center", roi: { x: 20, y: 30, width: 60, height: 40 } },
+  { label: "Full frame", roi: { x: 0, y: 0, width: 100, height: 100 } },
+];
+
+function validateRoiDraft(draft: RoiDraft): string {
+  const roi = { x: draft.x / 100, y: draft.y / 100, width: draft.width / 100, height: draft.height / 100 };
+  if (!Number.isFinite(roi.x) || !Number.isFinite(roi.y) || !Number.isFinite(roi.width) || !Number.isFinite(roi.height)) {
+    return "Values must be numbers";
+  }
+  if (roi.x < 0 || roi.y < 0) {
+    return "X and Y must be 0% or greater";
+  }
+  if (roi.width < 0.02 || roi.height < 0.02) {
+    return "Width and height must be at least 2%";
+  }
+  if (roi.x + roi.width > 1.0001 || roi.y + roi.height > 1.0001) {
+    return "Area must stay inside the frame";
+  }
+  return "";
+}
 
 const LANGUAGES = [
   { value: "chi_sim+eng", label: "中英 chi_sim+eng" },
@@ -84,6 +143,20 @@ const setOcrOptions = callable<
   BackendStatus
 >("set_ocr_options");
 const runOcrNow = callable<[boxId: string], OcrTestResult | null>("run_ocr_now");
+const setOverlayEnabled = callable<[enabled: boolean], OverlayStatus>("set_overlay_enabled");
+const roiConfigGet = callable<[appId: string | null], RecognitionROIResult>("roi_config_get");
+const roiConfigSet = callable<[roi: RecognitionROI, appId: string | null], RecognitionROIResult>("roi_config_set");
+const roiConfigReset = callable<[appId: string | null], RecognitionROIResult>("roi_config_reset");
+
+// Phase 1C feature flags.
+// The persistent Gamescope external overlay renderer (backend) now owns caption
+// display, so the legacy React caption overlay and the notification keepalive
+// workaround are OFF by default. Region preview (QAM open only) stays enabled
+// because it is needed to position the OCR ROI.
+const ENABLE_LEGACY_SUBTITLE_OVERLAY = false;
+const ENABLE_NOTIFICATION_KEEPALIVE = false;
+// Debug probes must never render in a production/startup build.
+const ENABLE_DEBUG_PROBES = false;
 
 let globalSelectedBoxId: string | undefined;
 const selectionEvents = new EventTarget();
@@ -392,6 +465,9 @@ function Content() {
   const textColor = useTextColor();
   const fontSize = useFontSize();
   const toastEnabled = useToastEnabled();
+  const [roiDraft, setRoiDraft] = useState<RoiDraft>({ x: 8, y: 62, width: 84, height: 32 });
+  const [roiSource, setRoiSource] = useState<string>("default");
+  const [roiError, setRoiError] = useState<string>("");
 
   useEffect(() => {
     if (boxes.length === 0) {
@@ -445,6 +521,21 @@ function Content() {
     }
   };
 
+  const toggleOverlay = async () => {
+    const next = !(status?.overlay?.enabled ?? false);
+    try {
+      const result = await setOverlayEnabled(next);
+      toaster.toast({
+        title: "ClarifyDeck",
+        body: `Persistent overlay: ${result.state}${result.last_error ? ` (${result.last_error})` : ""}`,
+      });
+      await refresh();
+    } catch (error) {
+      console.warn("ClarifyDeck failed to toggle persistent overlay", error);
+      toaster.toast({ title: "ClarifyDeck", body: "Failed to toggle persistent overlay" });
+    }
+  };
+
   const changeLang = async (lang: string) => {
     try {
       const nextStatus = await setOcrLang(lang);
@@ -489,6 +580,72 @@ function Content() {
     }
   };
 
+  const applyRoiResult = (result: RecognitionROIResult) => {
+    if (result.roi) {
+      setRoiDraft({
+        x: Math.round(result.roi.x * 100),
+        y: Math.round(result.roi.y * 100),
+        width: Math.round(result.roi.width * 100),
+        height: Math.round(result.roi.height * 100),
+      });
+    }
+    setRoiSource(result.source ?? "default");
+    setRoiError(result.config_error ?? "");
+  };
+
+  const loadRoi = async () => {
+    try {
+      applyRoiResult(await roiConfigGet(null));
+    } catch (error) {
+      console.warn("ClarifyDeck failed to load recognition area", error);
+    }
+  };
+
+  useEffect(() => {
+    void loadRoi();
+  }, []);
+
+  const applyRoi = async () => {
+    const message = validateRoiDraft(roiDraft);
+    if (message) {
+      setRoiError(message);
+      toaster.toast({ title: "ClarifyDeck", body: message });
+      return;
+    }
+    try {
+      const result = await roiConfigSet(
+        {
+          x: roiDraft.x / 100,
+          y: roiDraft.y / 100,
+          width: roiDraft.width / 100,
+          height: roiDraft.height / 100,
+        },
+        null,
+      );
+      if (!result.ok) {
+        const detail = result.detail || result.error || "Rejected";
+        setRoiError(detail);
+        toaster.toast({ title: "ClarifyDeck", body: `Recognition area rejected: ${detail}` });
+        return;
+      }
+      applyRoiResult(result);
+      toaster.toast({ title: "ClarifyDeck", body: "Recognition area saved" });
+    } catch (error) {
+      console.warn("ClarifyDeck failed to save recognition area", error);
+      toaster.toast({ title: "ClarifyDeck", body: "Failed to save recognition area" });
+    }
+  };
+
+  const resetRoi = async () => {
+    try {
+      applyRoiResult(await roiConfigReset(null));
+      toaster.toast({ title: "ClarifyDeck", body: "Recognition area reset" });
+    } catch (error) {
+      console.warn("ClarifyDeck failed to reset recognition area", error);
+      toaster.toast({ title: "ClarifyDeck", body: "Failed to reset recognition area" });
+    }
+  };
+
   const captureAge = status?.last_capture_at
     ? Math.max(0, Math.round(Date.now() / 1000 - status.last_capture_at))
     : -1;
@@ -516,6 +673,92 @@ function Content() {
           {status?.enabled ? "Stop OCR capture" : "Start OCR capture"}
         </ButtonItem>
       </PanelSectionRow>
+
+      <PanelSection title="Recognition Area">
+        <PanelSectionRow>
+          <div style={statusStyle}>
+            <div>Source: {roiSource}</div>
+            <div>
+              X {roiDraft.x}% | Y {roiDraft.y}% | W {roiDraft.width}% | H {roiDraft.height}%
+            </div>
+            {roiError ? <div style={errorStyle}>{roiError}</div> : null}
+          </div>
+        </PanelSectionRow>
+        <CoordinateSlider
+          label="X%"
+          min={0}
+          max={99}
+          value={roiDraft.x}
+          onChange={(value) => setRoiDraft((draft) => ({ ...draft, x: value }))}
+        />
+        <CoordinateSlider
+          label="Y%"
+          min={0}
+          max={99}
+          value={roiDraft.y}
+          onChange={(value) => setRoiDraft((draft) => ({ ...draft, y: value }))}
+        />
+        <CoordinateSlider
+          label="W%"
+          min={2}
+          max={100}
+          value={roiDraft.width}
+          onChange={(value) => setRoiDraft((draft) => ({ ...draft, width: value }))}
+        />
+        <CoordinateSlider
+          label="H%"
+          min={2}
+          max={100}
+          value={roiDraft.height}
+          onChange={(value) => setRoiDraft((draft) => ({ ...draft, height: value }))}
+        />
+        <PanelSectionRow>
+          <div style={rowActionsStyle}>
+            <ButtonItem layout="below" onClick={applyRoi}>
+              Apply
+            </ButtonItem>
+            <ButtonItem layout="below" onClick={resetRoi}>
+              Reset
+            </ButtonItem>
+          </div>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <div style={rowActionsStyle}>
+            {ROI_PRESETS.map((preset) => (
+              <ButtonItem key={preset.label} layout="below" onClick={() => setRoiDraft(preset.roi)}>
+                {preset.label}
+              </ButtonItem>
+            ))}
+          </div>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <div style={hintStyle}>
+            Percent of the game frame. Apply validates and saves; Reset removes the override
+            and falls back to the preset.
+          </div>
+        </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title="Persistent Game Overlay (Experimental)">
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={toggleOverlay}>
+            {status?.overlay?.enabled ? "Disable persistent overlay" : "Enable persistent overlay"}
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <div style={statusStyle}>
+            <div>
+              Backend: {status?.backend?.role ?? "-"} (pid {status?.backend?.pid ?? "-"})
+            </div>
+            <div>Overlay state: {status?.overlay?.state ?? "DISABLED"}</div>
+            <div>Renderer pid: {status?.overlay?.renderer_pid ?? "-"}</div>
+            <div>Overlay display: {status?.overlay?.display ?? "-"}</div>
+            {status?.overlay?.last_error ? (
+              <div style={errorStyle}>{status.overlay.last_error}</div>
+            ) : null}
+          </div>
+        </PanelSectionRow>
+      </PanelSection>
 
       <PanelSectionRow>
         <div style={rowActionsStyle}>
@@ -754,8 +997,12 @@ function Overlay() {
 
   return (
     <div ref={rootRef} style={overlayRootStyle}>
-      <div style={overlayProbeStyle}>CD probe {boxes.length}</div>
-      {qamVisible ? <div style={overlayBadgeStyle}>CD overlay: {boxes.length}</div> : null}
+      {ENABLE_DEBUG_PROBES ? (
+        <div style={overlayProbeStyle}>CD probe {boxes.length}</div>
+      ) : null}
+      {ENABLE_DEBUG_PROBES && qamVisible ? (
+        <div style={overlayBadgeStyle}>CD overlay: {boxes.length}</div>
+      ) : null}
 
       {qamVisible
         ? boxes.map((box, index) => {
@@ -783,25 +1030,27 @@ function Overlay() {
           })
         : null}
 
-      {boxes
-        .filter((box) => box.text.trim().length > 0)
-        .map((box) => (
-          <div
-            key={`subtitle-${box.id}`}
-            style={{
-              ...subtitleBoxStyle,
-              background: subtitleBackground,
-              color: textColor,
-              fontSize,
-              left: box.x * sx,
-              top: box.y * sy,
-              width: box.w * sx,
-              height: box.h * sy,
-            }}
-          >
-            {box.text}
-          </div>
-        ))}
+      {ENABLE_LEGACY_SUBTITLE_OVERLAY
+        ? boxes
+            .filter((box) => box.text.trim().length > 0)
+            .map((box) => (
+              <div
+                key={`subtitle-${box.id}`}
+                style={{
+                  ...subtitleBoxStyle,
+                  background: subtitleBackground,
+                  color: textColor,
+                  fontSize,
+                  left: box.x * sx,
+                  top: box.y * sy,
+                  width: box.w * sx,
+                  height: box.h * sy,
+                }}
+              >
+                {box.text}
+              </div>
+            ))
+        : null}
     </div>
   );
 }
@@ -945,7 +1194,7 @@ const subtitleBoxStyle: CSSProperties = {
 export default definePlugin(() => {
   console.log("ClarifyDeck initializing");
   const disposeOverlay = mountOverlay();
-  const disposeToast = mountOverlayKeepAlive();
+  const disposeToast = ENABLE_NOTIFICATION_KEEPALIVE ? mountOverlayKeepAlive() : () => {};
 
   return {
     name: "ClarifyDeck",

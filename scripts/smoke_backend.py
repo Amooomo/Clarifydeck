@@ -136,6 +136,13 @@ async def run() -> None:
     assert removed
     assert await engine.list_boxes() == []
 
+    boot_status = await engine.get_status()
+    assert boot_status["backend"]["role"] == "standby"
+    assert boot_status["overlay"] is None
+    await engine.overlay_update("no-op before explicit enable")
+    await engine.overlay_hide()
+    assert engine.overlay_status() is None
+
     print("ClarifyDeck backend smoke test passed")
 
 

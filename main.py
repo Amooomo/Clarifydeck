@@ -1,5 +1,6 @@
 import asyncio
 import dataclasses
+import json
 import math
 import os
 import re
@@ -13,7 +14,44 @@ import zlib
 from pathlib import Path
 from typing import Any, Optional
 
+import sys as _sys
+
+_PLUGIN_DIR = Path(__file__).resolve().parent
+if str(_PLUGIN_DIR) not in _sys.path:
+    _sys.path.insert(0, str(_PLUGIN_DIR))
+
 import decky
+
+try:
+    from overlay_manager import OverlayManager, resolve_python3
+except Exception:  # pragma: no cover - optional at import time
+    OverlayManager = None  # type: ignore[assignment]
+
+    def resolve_python3() -> str:  # type: ignore[misc]
+        raise RuntimeError("python3_not_found")
+
+try:
+    from backend_leader import BackgroundLeaderLease, LeaderAcquireResult
+except Exception:  # pragma: no cover - optional at import time
+    BackgroundLeaderLease = None  # type: ignore[assignment]
+    LeaderAcquireResult = None  # type: ignore[assignment]
+
+try:
+    from capture import gamescope_capture, recognition_roi
+    from capture.errors import CaptureError
+    from capture.latest_frame_queue import LatestFrameQueue
+    from capture.producer import CaptureProducer
+except Exception:  # pragma: no cover - optional at import time
+    gamescope_capture = None  # type: ignore[assignment]
+    recognition_roi = None  # type: ignore[assignment]
+    LatestFrameQueue = None  # type: ignore[assignment]
+    CaptureProducer = None  # type: ignore[assignment]
+
+    class CaptureError(Exception):  # type: ignore[no-redef]
+        def __init__(self, code: str = "error", message: str = "") -> None:
+            super().__init__(message)
+            self.code = code
+            self.message = message
 
 
 def _plugin_root() -> Path:
@@ -304,12 +342,22 @@ class ClarifyDeckEngine:
         self._debug_dir = self._resolve_debug_dir()
         self._ocr_in_progress = False
         self._langs_cache: Optional[list[str]] = None
+        self._overlay: Optional[Any] = None
+        self._producer: Optional[Any] = None
+        self._frame_queue: Optional[Any] = None
+        self._leader = BackgroundLeaderLease() if BackgroundLeaderLease is not None else None
+        self._role = "standby"
+        self._roi_config: Optional[Any] = None
+        self._roi_resolver: Optional[Any] = None
 
     def configure_runtime(self, runtime_dir: str | Path) -> None:
         self._runtime_dir = Path(runtime_dir)
         self._runtime_dir.mkdir(parents=True, exist_ok=True)
 
     async def start(self) -> dict[str, Any]:
+        if self._role != "leader":
+            decky.logger.warning("standby backend: refusing to start capture")
+            return await self.get_status()
         self._enabled = True
         self._last_error = ""
         if self._capture_task is None or self._capture_task.done():
@@ -318,6 +366,10 @@ class ClarifyDeckEngine:
         return await self.get_status()
 
     async def stop(self) -> dict[str, Any]:
+        # Standby backends never started capture/OCR, so they must not stop it.
+        if self._role != "leader":
+            self._enabled = False
+            return await self.get_status()
         self._enabled = False
         if self._stop_event is not None:
             self._stop_event.set()
@@ -404,6 +456,10 @@ class ClarifyDeckEngine:
             return {"text": None, "error": "region out of frame", "crop_path": None}
         crop_path = self._save_debug_crop(crop, f"last_crop_{box_id}")
         text = await self._run_ocr(crop)
+        if text:
+            await self.overlay_update(text)
+        else:
+            await self.overlay_hide()
         return {
             "text": text,
             "error": self._last_error if text is None else "",
@@ -448,6 +504,9 @@ class ClarifyDeckEngine:
             "screen_width": self._screen_width,
             "screen_height": self._screen_height,
             "frame_cached": self._last_frame is not None,
+            "overlay": self.overlay_status(),
+            "backend": {"pid": os.getpid(), "role": self._role},
+            "capture_producer": self.capture_producer_status(),
         }
 
     def _list_langs(self) -> list[str]:
@@ -480,6 +539,326 @@ class ClarifyDeckEngine:
 
     async def clear_error(self) -> None:
         self._last_error = ""
+
+    def become_leader(self) -> str:
+        if self._leader is None:
+            self._role = "standby"
+            return self._role
+        result = self._leader.try_acquire()
+        if LeaderAcquireResult is not None and result == LeaderAcquireResult.ACQUIRED:
+            self._role = "leader"
+        elif LeaderAcquireResult is not None and result == LeaderAcquireResult.BUSY:
+            self._role = "standby"
+        else:
+            self._role = "error"
+        return self._role
+
+    def leader_lock_path(self) -> str:
+        if self._leader is None:
+            return ""
+        return str(self._leader.path)
+
+    def leader_lock_error(self) -> str:
+        if self._leader is None:
+            return ""
+        stage = self._leader.last_stage or ""
+        error = self._leader.last_error or ""
+        return f"stage={stage} exception={error}" if error else ""
+
+    def role(self) -> str:
+        return self._role
+
+    def init_overlay(self, debug: bool = False) -> None:
+        if self._role != "leader" or OverlayManager is None:
+            return
+        if self._overlay is None:
+            self._overlay = OverlayManager(debug=debug)
+
+    async def enable_overlay(self) -> dict[str, Any]:
+        if self._role != "leader" or self._overlay is None:
+            return {"enabled": False, "state": "unavailable"}
+        return await self._overlay.enable()
+
+    async def disable_overlay(self) -> dict[str, Any]:
+        if self._overlay is None:
+            return {"enabled": False, "state": "DISABLED"}
+        return await self._overlay.disable()
+
+    def overlay_status(self) -> Optional[dict[str, Any]]:
+        if self._overlay is None:
+            return None
+        return self._overlay.status()
+
+    async def stop_overlay(self) -> None:
+        # Owner-aware cleanup: a standby backend must never release or touch
+        # resources owned by the leader.
+        if self._role != "leader":
+            self._overlay = None
+            return
+        if self._overlay is not None:
+            try:
+                await self._overlay.stop()
+            except Exception as exc:
+                decky.logger.error(f"overlay stop failed: {exc}")
+            self._overlay = None
+        if self._leader is not None:
+            self._leader.release()
+        self._role = "standby"
+
+    async def overlay_update(self, text: str) -> None:
+        if self._overlay is None:
+            return
+        try:
+            await self._overlay.update(text)
+        except Exception as exc:
+            decky.logger.error(f"overlay update failed: {exc}")
+
+    async def overlay_hide(self) -> None:
+        if self._overlay is None:
+            return
+        try:
+            await self._overlay.hide()
+        except Exception as exc:
+            decky.logger.error(f"overlay hide failed: {exc}")
+
+    def capture_test(self, mode: str = "base_plane_only", output: str = "") -> dict[str, Any]:
+        """One-shot capture isolation test. Never starts a loop, OCR or overlay."""
+        if mode not in ("base_plane_only", "all_real_layers", "full_composition", "screen_buffer"):
+            return {"ok": False, "error": "invalid_mode"}
+        try:
+            python = resolve_python3()
+        except Exception as exc:
+            return {"ok": False, "error": f"python3_not_found:{exc}"}
+        argv = [python, "-m", "capture.gamescope_capture", "--mode", mode, "--json"]
+        if output:
+            argv += ["--output", output]
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(_PLUGIN_DIR) + os.pathsep + env.get("PYTHONPATH", "")
+        try:
+            proc = subprocess.run(
+                argv,
+                cwd=str(_PLUGIN_DIR),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "capture_timeout"}
+        except Exception as exc:
+            return {"ok": False, "error": f"capture_failed:{exc}"}
+        for line in reversed((proc.stdout or "").strip().splitlines()):
+            try:
+                return json.loads(line)
+            except Exception:
+                continue
+        return {"ok": False, "error": "capture_failed", "stderr": (proc.stderr or "")[:300]}
+
+    def capture_probe(self) -> dict[str, Any]:
+        try:
+            python = resolve_python3()
+        except Exception as exc:
+            return {"ok": False, "error": f"python3_not_found:{exc}"}
+        argv = [python, "-m", "capture.gamescope_capture", "--probe", "--json"]
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(_PLUGIN_DIR) + os.pathsep + env.get("PYTHONPATH", "")
+        try:
+            proc = subprocess.run(
+                argv,
+                cwd=str(_PLUGIN_DIR),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": f"capture_probe_failed:{exc}"}
+        for line in reversed((proc.stdout or "").strip().splitlines()):
+            try:
+                return json.loads(line)
+            except Exception:
+                continue
+        return {"ok": False, "error": "capture_probe_failed", "stderr": (proc.stderr or "")[:300]}
+
+    def capture_frame_test(self, debug_copy: str = "") -> dict[str, Any]:
+        """One-shot in-memory CaptureFrame test. No loop, OCR or overlay."""
+        try:
+            python = resolve_python3()
+        except Exception as exc:
+            return {"ok": False, "error": f"python3_not_found:{exc}"}
+        argv = [python, "-m", "capture.gamescope_capture", "--frame", "--json"]
+        if debug_copy:
+            argv += ["--debug-copy", debug_copy]
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(_PLUGIN_DIR) + os.pathsep + env.get("PYTHONPATH", "")
+        try:
+            proc = subprocess.run(
+                argv,
+                cwd=str(_PLUGIN_DIR),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "capture_timeout"}
+        except Exception as exc:
+            return {"ok": False, "error": f"capture_failed:{exc}"}
+        for line in reversed((proc.stdout or "").strip().splitlines()):
+            try:
+                return json.loads(line)
+            except Exception:
+                continue
+        return {"ok": False, "error": "capture_failed", "stderr": (proc.stderr or "")[:300]}
+
+    def _ensure_producer(self) -> Optional[Any]:
+        if self._producer is not None:
+            return self._producer
+        if CaptureProducer is None or LatestFrameQueue is None or gamescope_capture is None:
+            return None
+        self._frame_queue = LatestFrameQueue()
+        capture = gamescope_capture.GamescopeCapture(logger=decky.logger.info)
+        self._producer = CaptureProducer(capture, self._frame_queue, logger=decky.logger.info)
+        return self._producer
+
+    async def start_capture_producer(self, target_fps: float = 1.0) -> dict[str, Any]:
+        if self._role != "leader":
+            return {"ok": False, "state": "unavailable", "error": "not_leader"}
+        producer = self._ensure_producer()
+        if producer is None:
+            return {"ok": False, "state": "unavailable", "error": "producer_unavailable"}
+        return await producer.start(target_fps)
+
+    async def stop_capture_producer(self) -> dict[str, Any]:
+        if self._producer is None:
+            return {"ok": True, "state": "STOPPED", "detail": "already_stopped"}
+        return await self._producer.stop()
+
+    async def reset_capture_producer(self) -> dict[str, Any]:
+        if self._producer is None:
+            return {"ok": True, "state": "STOPPED"}
+        return await self._producer.reset()
+
+    def capture_producer_status(self) -> dict[str, Any]:
+        if self._producer is None:
+            return {
+                "ok": True,
+                "state": "STOPPED",
+                "target_fps": None,
+                "frames_attempted": 0,
+                "frames_succeeded": 0,
+                "frames_failed": 0,
+                "last_sequence": None,
+                "last_capture_ms": None,
+                "queue": None,
+            }
+        return self._producer.status()
+
+    async def shutdown_capture(self) -> None:
+        if self._producer is not None:
+            try:
+                await self._producer.stop()
+            except Exception as exc:
+                decky.logger.error(f"capture producer stop failed: {exc}")
+            self._producer = None
+        if self._frame_queue is not None:
+            self._frame_queue.clear()
+            self._frame_queue = None
+
+    # -- Phase 2E.2 recognition ROI config ---------------------------------
+
+    def roi_config_path(self) -> Path:
+        base = getattr(decky, "DECKY_PLUGIN_SETTINGS_DIR", None) or getattr(
+            decky, "DECKY_PLUGIN_RUNTIME_DIR", None
+        )
+        if not base:
+            base = tempfile.gettempdir()
+        return Path(base) / "recognition_roi.json"
+
+    def configure_roi_config(self, path: str | Path) -> None:
+        if recognition_roi is None:
+            return
+        self._roi_config = recognition_roi.configure(Path(path))
+        self._roi_resolver = recognition_roi.ActiveROIResolver(self._roi_config)
+
+    def _roi_store(self) -> Optional[Any]:
+        if recognition_roi is None:
+            return None
+        if self._roi_config is None:
+            self.configure_roi_config(self.roi_config_path())
+        return self._roi_config
+
+    def _roi_resolver_obj(self) -> Optional[Any]:
+        store = self._roi_store()
+        if store is None:
+            return None
+        if self._roi_resolver is None:
+            self._roi_resolver = recognition_roi.ActiveROIResolver(store)
+        return self._roi_resolver
+
+    def _roi_payload(self, active: Any, app_id: Optional[str], store: Optional[Any]) -> dict[str, Any]:
+        pixel = recognition_roi.resolve_roi(active.roi, self._screen_width, self._screen_height)
+        return {
+            "ok": True,
+            "app_id": app_id,
+            "source": active.source,
+            "roi": recognition_roi.roi_to_dict(active.roi),
+            "pixel": {"x": pixel.x, "y": pixel.y, "width": pixel.width, "height": pixel.height},
+            "frame": {"width": self._screen_width, "height": self._screen_height},
+            "config_path": str(store.path) if store is not None else "",
+            "config_error": store.last_error if store is not None else None,
+        }
+
+    def roi_config_get(self, app_id: Optional[str] = None) -> dict[str, Any]:
+        store = self._roi_store()
+        resolver = self._roi_resolver_obj()
+        if store is None or resolver is None:
+            return {"ok": False, "error": "roi_config_unavailable"}
+        return self._roi_payload(resolver.resolve(app_id), app_id, store)
+
+    def roi_config_set(self, roi: dict[str, Any], app_id: Optional[str] = None) -> dict[str, Any]:
+        store = self._roi_store()
+        resolver = self._roi_resolver_obj()
+        if store is None or resolver is None:
+            return {"ok": False, "error": "roi_config_unavailable"}
+        try:
+            validated = recognition_roi.parse_roi(roi)
+        except CaptureError as exc:
+            return {"ok": False, "error": exc.code, "detail": str(exc)}
+        try:
+            store.set(app_id, validated)
+        except CaptureError as exc:
+            return {"ok": False, "error": exc.code, "detail": str(exc)}
+        except OSError as exc:
+            return {"ok": False, "error": "config_write_failed", "detail": str(exc)}
+        return self._roi_payload(resolver.resolve(app_id), app_id, store)
+
+    def roi_config_reset(self, app_id: Optional[str] = None) -> dict[str, Any]:
+        store = self._roi_store()
+        resolver = self._roi_resolver_obj()
+        if store is None or resolver is None:
+            return {"ok": False, "error": "roi_config_unavailable"}
+        try:
+            store.reset(app_id)
+        except OSError as exc:
+            return {"ok": False, "error": "config_write_failed", "detail": str(exc)}
+        return self._roi_payload(resolver.resolve(app_id), app_id, store)
+
+    def roi_config_preview(
+        self, roi: Optional[dict[str, Any]] = None, app_id: Optional[str] = None
+    ) -> dict[str, Any]:
+        store = self._roi_store()
+        resolver = self._roi_resolver_obj()
+        if store is None or resolver is None:
+            return {"ok": False, "error": "roi_config_unavailable"}
+        if roi is None:
+            return self._roi_payload(resolver.resolve(app_id), app_id, store)
+        try:
+            validated = recognition_roi.parse_roi(roi)
+        except CaptureError as exc:
+            return {"ok": False, "error": exc.code, "detail": str(exc)}
+        active = recognition_roi.RecognitionROI(validated, "preview")
+        return self._roi_payload(active, app_id, store)
 
     async def _capture_loop(self) -> None:
         while self._stop_event is not None and not self._stop_event.is_set():
@@ -549,6 +928,7 @@ class ClarifyDeckEngine:
                 live_box.last_attempt_at = now
                 if text is None:
                     self._snapshot_cache.pop(box.id, None)
+                    await self.overlay_hide()
                     continue
                 live_box.text = text
                 live_box.last_mse = None if math.isinf(mse) else mse
@@ -557,6 +937,7 @@ class ClarifyDeckEngine:
 
             self._snapshot_cache[box.id] = signature
             self._last_ocr_at = now
+            await self.overlay_update(payload["text"])
             await decky.emit("ocr_broadcast", {"id": payload["id"], "text": payload["text"], "box": payload})
 
     async def _capture_frame(self) -> Optional[RGBFrame]:
@@ -854,20 +1235,101 @@ class Plugin:
     async def run_ocr_now(self, box_id: str) -> Optional[dict[str, Any]]:
         return await get_engine().run_ocr_now(box_id)
 
+    async def enable_overlay(self) -> dict[str, Any]:
+        return await get_engine().enable_overlay()
+
+    async def disable_overlay(self) -> dict[str, Any]:
+        return await get_engine().disable_overlay()
+
+    async def set_overlay_enabled(self, enabled: bool) -> dict[str, Any]:
+        if enabled:
+            return await get_engine().enable_overlay()
+        return await get_engine().disable_overlay()
+
+    async def get_overlay_status(self) -> Optional[dict[str, Any]]:
+        return get_engine().overlay_status()
+
+    async def capture_test_base_plane(self, output: str = "") -> dict[str, Any]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, get_engine().capture_test, "base_plane_only", output)
+
+    async def capture_probe(self) -> dict[str, Any]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, get_engine().capture_probe)
+
+    async def capture_frame_test(self, debug_copy: str = "") -> dict[str, Any]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, get_engine().capture_frame_test, debug_copy)
+
+    async def capture_producer_start(self, target_fps: float = 1.0) -> dict[str, Any]:
+        return await get_engine().start_capture_producer(target_fps)
+
+    async def capture_producer_stop(self) -> dict[str, Any]:
+        return await get_engine().stop_capture_producer()
+
+    async def capture_producer_reset(self) -> dict[str, Any]:
+        return await get_engine().reset_capture_producer()
+
+    async def capture_producer_status(self) -> dict[str, Any]:
+        return get_engine().capture_producer_status()
+
+    async def roi_config_get(self, app_id: Optional[str] = None) -> dict[str, Any]:
+        return get_engine().roi_config_get(app_id)
+
+    async def roi_config_set(self, roi: dict[str, Any], app_id: Optional[str] = None) -> dict[str, Any]:
+        return get_engine().roi_config_set(roi, app_id)
+
+    async def roi_config_reset(self, app_id: Optional[str] = None) -> dict[str, Any]:
+        return get_engine().roi_config_reset(app_id)
+
+    async def roi_config_preview(
+        self, roi: Optional[dict[str, Any]] = None, app_id: Optional[str] = None
+    ) -> dict[str, Any]:
+        return get_engine().roi_config_preview(roi, app_id)
+
     async def clear_error(self) -> None:
         await get_engine().clear_error()
 
     async def _main(self) -> None:
         runtime_dir = getattr(decky, "DECKY_PLUGIN_RUNTIME_DIR", tempfile.gettempdir())
-        get_engine().configure_runtime(runtime_dir)
+        engine = get_engine()
+        engine.configure_runtime(runtime_dir)
+        debug = os.environ.get("CLARIFYDECK_OVERLAY_DEBUG") == "1"
+        role = engine.become_leader()
+        if role == "leader":
+            decky.logger.info(
+                f"ClarifyDeck backend pid={os.getpid()} role=leader leader_lock=acquired "
+                f"leader_lock_path={engine.leader_lock_path()}"
+            )
+            # Create the manager object only. The renderer is NOT spawned until the
+            # user explicitly enables the persistent overlay.
+            engine.init_overlay(debug=debug)
+            decky.logger.info(
+                "ClarifyDeck overlay boot state=DISABLED; renderer spawn prohibited "
+                "until explicit RPC enable"
+            )
+        elif role == "standby":
+            decky.logger.info(
+                f"ClarifyDeck backend pid={os.getpid()} role=standby leader_lock=busy "
+                "background services disabled"
+            )
+        else:
+            decky.logger.error(
+                f"ClarifyDeck backend pid={os.getpid()} role=error leader_lock=error "
+                f"{engine.leader_lock_error()} background services disabled"
+            )
         decky.logger.info("ClarifyDeck backend initialized; OCR is stopped until start_plugin is called")
 
     async def _unload(self) -> None:
         await get_engine().stop()
+        await get_engine().shutdown_capture()
+        await get_engine().stop_overlay()
         decky.logger.info("ClarifyDeck backend unloaded")
 
     async def _uninstall(self) -> None:
         await get_engine().stop()
+        await get_engine().shutdown_capture()
+        await get_engine().stop_overlay()
         decky.logger.info("ClarifyDeck backend uninstalled")
 
     async def _migration(self) -> None:

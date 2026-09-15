@@ -59,3 +59,11 @@ cli/decky
 .pnpm-cache
 _tmp_*
 .conda-pkgs
+
+# Phase 1 overlay investigation artifacts
+debug/
+scripts/overlay_poc/overlay_poc
+
+# Phase 2F.1 offline OCR runtime bundle (large build artifact; manifest kept)
+runtime/ocr/site-packages/
+runtime/ocr/wheels/
