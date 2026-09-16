@@ -1,0 +1,178 @@
+// Phase 2L.7 — pure multi-region editor logic (no React, no @decky/api).
+// Kept dependency-free so the lightweight Node harness can unit-test it.
+
+export type RegionDraft = {
+  region_id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  enabled: boolean;
+  name?: string | null;
+};
+
+export type RegionConfigPayload = {
+  ok?: boolean;
+  version?: number;
+  scope?: string;
+  app_id?: string | null;
+  configured?: boolean;
+  configured_regions?: RegionDraft[];
+  effective_regions?: RegionDraft[];
+  source?: string;
+  max_regions?: number;
+  last_error?: string | null;
+  config_path?: string;
+  error?: string;
+  detail?: string;
+};
+
+export const MAX_REGIONS = 8;
+export const MIN_REGION_SIZE = 0.02;
+export const NEW_REGION_PREFIX = "new-";
+
+export function primaryRegionId(regions: RegionDraft[]): string | null {
+  for (const region of regions) {
+    if (region.enabled) {
+      return region.region_id;
+    }
+  }
+  return null;
+}
+
+export function canAddRegion(regions: RegionDraft[]): boolean {
+  return regions.length < MAX_REGIONS;
+}
+
+export function newRegionDraft(index: number): RegionDraft {
+  const y = Math.min(0.1 + 0.12 * index, 0.8);
+  return {
+    region_id: `${NEW_REGION_PREFIX}${Date.now().toString(36)}-${index}`,
+    x: 0.1,
+    y,
+    w: 0.8,
+    h: 0.15,
+    enabled: true,
+    name: "",
+  };
+}
+
+export function validateRegionDraft(region: RegionDraft): string {
+  const values = [region.x, region.y, region.w, region.h];
+  if (values.some((value) => !Number.isFinite(value))) {
+    return "Values must be numbers";
+  }
+  if (region.x < 0 || region.y < 0 || region.x >= 1 || region.y >= 1) {
+    return "X and Y must be between 0% and 99%";
+  }
+  if (region.w < MIN_REGION_SIZE || region.h < MIN_REGION_SIZE) {
+    return "Width and height must be at least 2%";
+  }
+  if (region.w > 1 || region.h > 1) {
+    return "Width and height must be at most 100%";
+  }
+  if (region.x + region.w > 1.0001 || region.y + region.h > 1.0001) {
+    return "Area must stay inside the frame";
+  }
+  return "";
+}
+
+export function validateRegions(regions: RegionDraft[]): string {
+  if (regions.length > MAX_REGIONS) {
+    return `At most ${MAX_REGIONS} regions are allowed`;
+  }
+  for (const region of regions) {
+    const message = validateRegionDraft(region);
+    if (message) {
+      return message;
+    }
+  }
+  return "";
+}
+
+export function updateRegionGeometry(
+  regions: RegionDraft[],
+  regionId: string,
+  patch: Partial<Pick<RegionDraft, "x" | "y" | "w" | "h">>,
+): RegionDraft[] {
+  return regions.map((region) => (region.region_id === regionId ? { ...region, ...patch } : region));
+}
+
+export function setRegionEnabled(regions: RegionDraft[], regionId: string, enabled: boolean): RegionDraft[] {
+  return regions.map((region) => (region.region_id === regionId ? { ...region, enabled } : region));
+}
+
+export function setRegionName(regions: RegionDraft[], regionId: string, name: string): RegionDraft[] {
+  return regions.map((region) => (region.region_id === regionId ? { ...region, name } : region));
+}
+
+export function removeRegion(regions: RegionDraft[], regionId: string): RegionDraft[] {
+  return regions.filter((region) => region.region_id !== regionId);
+}
+
+export function moveRegion(regions: RegionDraft[], regionId: string, delta: number): RegionDraft[] {
+  const index = regions.findIndex((region) => region.region_id === regionId);
+  const target = index + delta;
+  if (index < 0 || target < 0 || target >= regions.length) {
+    return regions;
+  }
+  const next = regions.slice();
+  const [item] = next.splice(index, 1);
+  next.splice(target, 0, item);
+  return next;
+}
+
+export function nextSelectionAfterRemove(regions: RegionDraft[], removedId: string): string | null {
+  const index = regions.findIndex((region) => region.region_id === removedId);
+  if (index < 0) {
+    return regions[0]?.region_id ?? null;
+  }
+  const remaining = regions.filter((region) => region.region_id !== removedId);
+  if (remaining.length === 0) {
+    return null;
+  }
+  return (remaining[Math.min(index, remaining.length - 1)] ?? remaining[0]).region_id;
+}
+
+export function scopeOptions(appIdAvailable: boolean): { value: string; label: string; disabled: boolean }[] {
+  return [
+    { value: "global", label: "Global", disabled: false },
+    { value: "per_game", label: "This Game", disabled: !appIdAvailable },
+  ];
+}
+
+export function scopeAppId(scope: string, appId: string | null): string | null {
+  return scope === "per_game" ? appId : null;
+}
+
+// Inherited (not-yet-configured) regions must not be persisted merely by opening
+// the editor; on explicit Apply their IDs are stripped so the backend assigns
+// fresh stable IDs (adoption).
+export function draftsForApply(regions: RegionDraft[], configured: boolean): RegionDraft[] {
+  return regions.map((region) => {
+    const existing = configured && region.region_id && !region.region_id.startsWith(NEW_REGION_PREFIX);
+    return existing ? region : { ...region, region_id: "" };
+  });
+}
+
+export function describeSource(source?: string | null): string {
+  switch (source) {
+    case "per_game":
+      return "This Game regions";
+    case "global":
+      return "Global regions";
+    case "legacy":
+      return "Imported single region";
+    case "builtin":
+      return "Default region";
+    default:
+      return "Unknown";
+  }
+}
+
+export function regionLabel(region: RegionDraft, index: number, primaryId: string | null): string {
+  const name = region.name && region.name.trim().length > 0 ? region.name.trim() : `Region ${index + 1}`;
+  const primary = region.region_id === primaryId ? " [Primary]" : "";
+  const disabled = region.enabled ? "" : " (off)";
+  return `${name}${primary}${disabled}`;
+}

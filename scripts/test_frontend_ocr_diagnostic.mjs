@@ -16,13 +16,15 @@ const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), ".."
 const LOGIC = path.join(ROOT, "src", "ocrDiagnostic.ts");
 const COMPONENT = path.join(ROOT, "src", "components", "OCRDiagnostic.tsx");
 const INDEX = path.join(ROOT, "src", "index.tsx");
+const REGION_LOGIC = path.join(ROOT, "src", "regionEditor.ts");
+const REGION_COMPONENT = path.join(ROOT, "src", "components", "RegionEditor.tsx");
 
-async function loadLogic() {
-  const source = fs.readFileSync(LOGIC, "utf8");
+async function loadTs(file, tag) {
+  const source = fs.readFileSync(file, "utf8");
   const output = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 },
   }).outputText;
-  const tmp = path.join(os.tmpdir(), `clarifydeck-ocrdiag-${process.pid}.mjs`);
+  const tmp = path.join(os.tmpdir(), `clarifydeck-${tag}-${process.pid}.mjs`);
   fs.writeFileSync(tmp, output, "utf8");
   try {
     return await import(url.pathToFileURL(tmp).href);
@@ -31,8 +33,10 @@ async function loadLogic() {
   }
 }
 
-const logic = await loadLogic();
+const logic = await loadTs(LOGIC, "ocrdiag");
+const regionLogic = await loadTs(REGION_LOGIC, "region");
 const componentSrc = fs.readFileSync(COMPONENT, "utf8");
+const regionComponentSrc = fs.readFileSync(REGION_COMPONENT, "utf8");
 const indexSrc = fs.readFileSync(INDEX, "utf8");
 
 let passed = 0;
@@ -258,6 +262,110 @@ check("c2: QAM region preview retained", () => {
   for (const needle of ["regionBoxStyle", "selectedRegionBoxStyle", "qamVisible"]) {
     assert.ok(indexSrc.includes(needle), `index missing ${needle}`);
   }
+});
+
+// -- post-2L.7 multi-region Recognition Region editor -------------------------
+
+const r = regionLogic;
+const R = (over = {}) => ({ region_id: "r1", x: 0.1, y: 0.1, w: 0.2, h: 0.2, enabled: true, ...over });
+
+check("region: primary is first enabled", () =>
+  assert.equal(r.primaryRegionId([R({ region_id: "a" }), R({ region_id: "b" })]), "a"),
+);
+check("region: primary skips disabled", () =>
+  assert.equal(r.primaryRegionId([R({ region_id: "a", enabled: false }), R({ region_id: "b" })]), "b"),
+);
+check("region: primary none when all disabled", () =>
+  assert.equal(r.primaryRegionId([R({ enabled: false })]), null),
+);
+check("region: add cap", () => {
+  const eight = Array.from({ length: r.MAX_REGIONS }, (_, i) => R({ region_id: `r${i}` }));
+  assert.equal(r.canAddRegion(eight), false);
+  assert.equal(r.canAddRegion(eight.slice(0, 7)), true);
+});
+check("region: new draft is valid and unique", () => {
+  const a = r.newRegionDraft(0);
+  const b = r.newRegionDraft(1);
+  assert.notEqual(a.region_id, b.region_id);
+  assert.equal(a.enabled, true);
+  assert.equal(r.validateRegionDraft(a), "");
+});
+check("region: validate rejects bad geometry", () => {
+  assert.notEqual(r.validateRegionDraft(R({ w: 0 })), "");
+  assert.notEqual(r.validateRegionDraft(R({ x: 0.9, w: 0.2 })), "");
+  assert.notEqual(r.validateRegionDraft(R({ x: Number.NaN })), "");
+  assert.equal(r.validateRegionDraft(R({ x: 0.1, y: 0.1, w: 0.2, h: 0.2 })), "");
+});
+check("region: geometry edit keeps id", () => {
+  const next = r.updateRegionGeometry([R({ region_id: "a" })], "a", { x: 0.5 });
+  assert.equal(next[0].region_id, "a");
+  assert.equal(next[0].x, 0.5);
+});
+check("region: enable/name edits", () => {
+  assert.equal(r.setRegionEnabled([R()], "r1", false)[0].enabled, false);
+  assert.equal(r.setRegionName([R()], "r1", "Dialogue")[0].name, "Dialogue");
+});
+check("region: remove and next selection", () => {
+  const regions = [R({ region_id: "a" }), R({ region_id: "b" }), R({ region_id: "c" })];
+  assert.deepEqual(r.removeRegion(regions, "b").map((x) => x.region_id), ["a", "c"]);
+  assert.equal(r.nextSelectionAfterRemove(regions, "b"), "c");
+  assert.equal(r.nextSelectionAfterRemove([R({ region_id: "a" })], "a"), null);
+});
+check("region: reorder changes primary", () => {
+  const regions = [R({ region_id: "a" }), R({ region_id: "b" })];
+  const moved = r.moveRegion(regions, "b", -1);
+  assert.deepEqual(moved.map((x) => x.region_id), ["b", "a"]);
+  assert.equal(r.primaryRegionId(moved), "b");
+});
+check("region: scope app id mapping", () => {
+  assert.equal(r.scopeAppId("global", "app1"), null);
+  assert.equal(r.scopeAppId("per_game", "app1"), "app1");
+});
+check("region: this game disabled when no app id", () => {
+  const options = r.scopeOptions(false);
+  assert.equal(options[1].disabled, true);
+  assert.equal(r.scopeOptions(true)[1].disabled, false);
+});
+check("region: inherited drafts strip ids on apply", () => {
+  const effective = [R({ region_id: "legacy-primary" })];
+  assert.equal(r.draftsForApply(effective, false)[0].region_id, "");
+  assert.equal(r.draftsForApply(effective, true)[0].region_id, "legacy-primary");
+});
+check("region: new draft id stripped on apply", () =>
+  assert.equal(r.draftsForApply([R({ region_id: "new-1" })], true)[0].region_id, ""),
+);
+check("region: describe source", () => {
+  assert.equal(r.describeSource("global"), "Global regions");
+  assert.equal(r.describeSource("legacy"), "Imported single region");
+});
+check("region: label marks primary", () =>
+  assert.ok(r.regionLabel(R({ region_id: "a", name: "Dialogue" }), 0, "a").includes("Primary")),
+);
+
+check("region editor: RPCs declared once", () => {
+  for (const needle of ["region_config_get", "region_config_set", "region_config_reset"]) {
+    assert.equal(countOccurrences(regionComponentSrc, `"${needle}"`), 1, needle);
+  }
+});
+check("region editor: no OCR/renderer lifecycle calls", () => {
+  for (const needle of ["start_ocr_worker", "stop_ocr_worker", "capture_producer", "set_overlay_enabled", "spawn(", "python3"]) {
+    assert.equal(regionComponentSrc.includes(needle), false, `component contains ${needle}`);
+  }
+});
+check("region editor: states next-OCR-start notice", () =>
+  assert.ok(regionComponentSrc.includes("Changes apply on next OCR start")),
+);
+check("region editor: surfaces backend validation error", () => {
+  assert.ok(regionComponentSrc.includes("result.detail"));
+  assert.ok(regionComponentSrc.includes("result.error"));
+});
+check("region editor: shows inherited/effective note", () =>
+  assert.ok(regionComponentSrc.includes("effective regions")),
+);
+check("index renders the region editor", () => assert.ok(indexSrc.includes("<RegionEditorSection />")));
+check("index no longer presents legacy Regions as production editor", () => {
+  assert.equal(indexSrc.includes('<PanelSection title="Regions">'), false);
+  assert.ok(indexSrc.includes("Legacy Regions (Advanced)"));
 });
 
 if (process.exitCode) {

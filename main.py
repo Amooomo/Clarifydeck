@@ -37,13 +37,14 @@ except Exception:  # pragma: no cover - optional at import time
     LeaderAcquireResult = None  # type: ignore[assignment]
 
 try:
-    from capture import gamescope_capture, recognition_roi
+    from capture import gamescope_capture, recognition_regions, recognition_roi
     from capture.errors import CaptureError
     from capture.latest_frame_queue import LatestFrameQueue
     from capture.producer import CaptureProducer
 except Exception:  # pragma: no cover - optional at import time
     gamescope_capture = None  # type: ignore[assignment]
     recognition_roi = None  # type: ignore[assignment]
+    recognition_regions = None  # type: ignore[assignment]
     LatestFrameQueue = None  # type: ignore[assignment]
     CaptureProducer = None  # type: ignore[assignment]
 
@@ -365,6 +366,7 @@ class ClarifyDeckEngine:
         self._role = "standby"
         self._roi_config: Optional[Any] = None
         self._roi_resolver: Optional[Any] = None
+        self._region_config: Optional[Any] = None
         self._ocr_transport: Optional[Any] = None
         self._ocr_worker: Optional[Any] = None
         self._overlay_coordinator: Optional[Any] = None
@@ -989,6 +991,108 @@ class ClarifyDeckEngine:
         active = recognition_roi.RecognitionROI(validated, "preview")
         return self._roi_payload(active, app_id, store)
 
+    # -- Phase 2L.7 v2 RecognitionRegion config ----------------------------
+
+    def _region_store(self) -> Optional[Any]:
+        if recognition_regions is None:
+            return None
+        path = self.roi_config_path()
+        if self._region_config is None or Path(self._region_config.path) != path:
+            try:
+                self._region_config = recognition_regions.RegionConfigStore(path)
+            except Exception:
+                return None
+        return self._region_config
+
+    def _region_resolver_obj(self) -> Optional[Any]:
+        store = self._region_store()
+        if store is None:
+            return None
+        return recognition_regions.RegionResolver(store, legacy_resolver=self._roi_resolver_obj())
+
+    @staticmethod
+    def _region_source(store: Any, app_id: Optional[str]) -> str:
+        if app_id is not None and store.get_regions(app_id) is not None:
+            return "per_game"
+        if store.get_global_regions() is not None:
+            return "global"
+        return "legacy" if store.legacy else "builtin"
+
+    def _region_payload(self, app_id: Optional[str]) -> dict[str, Any]:
+        store = self._region_store()
+        resolver = self._region_resolver_obj()
+        if store is None or resolver is None:
+            return {"ok": False, "error": "region_config_unavailable"}
+        configured = store.get_regions(app_id)
+        effective = resolver.resolve_effective_regions(app_id).regions
+        to_dict = recognition_regions.region_to_dict
+        return {
+            "ok": True,
+            "version": recognition_regions.REGION_CONFIG_VERSION,
+            "scope": "global" if app_id is None else "per_game",
+            "app_id": app_id,
+            "configured": configured is not None,
+            "configured_regions": [to_dict(region) for region in (configured or ())],
+            "effective_regions": [to_dict(region) for region in effective],
+            "source": self._region_source(store, app_id),
+            "max_regions": recognition_regions.MAX_REGIONS,
+            "last_error": store.last_error,
+            "config_path": str(store.path),
+        }
+
+    def region_config_get(self, app_id: Optional[str] = None) -> dict[str, Any]:
+        return self._region_payload(app_id)
+
+    def region_config_set(self, regions: Any, app_id: Optional[str] = None) -> dict[str, Any]:
+        store = self._region_store()
+        if store is None:
+            return {"ok": False, "error": "region_config_unavailable"}
+        try:
+            region_set = self._parse_region_set(regions)
+            store.set_regions(app_id, region_set)
+        except CaptureError as exc:
+            return {"ok": False, "error": exc.code, "detail": str(exc)}
+        except OSError as exc:
+            return {"ok": False, "error": "config_write_failed", "detail": str(exc)}
+        return self._region_payload(app_id)
+
+    def region_config_reset(self, app_id: Optional[str] = None) -> dict[str, Any]:
+        store = self._region_store()
+        if store is None:
+            return {"ok": False, "error": "region_config_unavailable"}
+        try:
+            store.reset_regions(app_id)
+        except OSError as exc:
+            return {"ok": False, "error": "config_write_failed", "detail": str(exc)}
+        return self._region_payload(app_id)
+
+    @staticmethod
+    def _parse_region_set(regions: Any) -> Any:
+        if not isinstance(regions, (list, tuple)):
+            raise CaptureError("invalid_regions", "regions must be a list")
+        items = []
+        for entry in regions:
+            if not isinstance(entry, dict):
+                raise CaptureError("invalid_region", "region must be an object")
+            region_id = entry.get("region_id")
+            if not isinstance(region_id, str) or not region_id:
+                region_id = uuid.uuid4().hex  # backend assigns stable IDs
+            try:
+                items.append(
+                    recognition_regions.RecognitionRegion(
+                        region_id=region_id,
+                        x=float(entry["x"]),
+                        y=float(entry["y"]),
+                        w=float(entry["w"]),
+                        h=float(entry["h"]),
+                        enabled=bool(entry.get("enabled", True)),
+                        name=entry.get("name"),
+                    )
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise CaptureError("invalid_region", f"malformed region: {exc}") from exc
+        return recognition_regions.RecognitionRegionSet(tuple(items))
+
     async def _capture_loop(self) -> None:
         while self._stop_event is not None and not self._stop_event.is_set():
             try:
@@ -1415,6 +1519,17 @@ class Plugin:
         self, roi: Optional[dict[str, Any]] = None, app_id: Optional[str] = None
     ) -> dict[str, Any]:
         return get_engine().roi_config_preview(roi, app_id)
+
+    async def region_config_get(self, app_id: Optional[str] = None) -> dict[str, Any]:
+        return get_engine().region_config_get(app_id)
+
+    async def region_config_set(
+        self, regions: Optional[list[dict[str, Any]]] = None, app_id: Optional[str] = None
+    ) -> dict[str, Any]:
+        return get_engine().region_config_set(regions or [], app_id)
+
+    async def region_config_reset(self, app_id: Optional[str] = None) -> dict[str, Any]:
+        return get_engine().region_config_reset(app_id)
 
     async def get_ocr_transport_status(self) -> dict[str, Any]:
         return get_engine().ocr_transport_status()

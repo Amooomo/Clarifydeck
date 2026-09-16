@@ -1552,6 +1552,42 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
   multi-region mode while per-region scheduling works; diagnostics refactor
   deferred.
 
+## Phase 2L.7 — Persistent QAM Multi-Region Editor
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+- The old QAM `Regions` / `Recognition Area` sections were never production OCR
+  (legacy in-memory `BoxState` + single-ROI editor). They are now relabeled
+  `Legacy ... (Advanced)` and are no longer presented as the production region
+  editor.
+- New backend v2 RPCs (`main.py`): `region_config_get(app_id?)`,
+  `region_config_set(regions, app_id?)`, `region_config_reset(app_id?)`, backed by
+  `capture/recognition_regions.RegionConfigStore`/`RegionResolver` (the 2L.1
+  authoritative model). They return `scope`, `configured` vs `effective_regions`,
+  `source`, `max_regions`, `last_error`, and never expose internal objects.
+- scopes: Global and This Game (per-game). No app_id source exists in the QAM yet,
+  so This Game is shown disabled. Global/per-game writes are isolated; editing one
+  scope never mutates the other.
+- stable IDs: existing IDs are preserved on rename/geometry/enable/reorder/save.
+  New/blank region IDs are assigned by the backend (`uuid4().hex`). Legacy/inherited
+  regions are read without side effects and are adopted with fresh stable IDs only
+  on explicit Apply (`draftsForApply` strips IDs when the scope is not configured).
+- new QAM editor (`src/components/RegionEditor.tsx`, pure logic in
+  `src/regionEditor.ts`): scope, region list keyed by `region_id`, add/remove,
+  enable, optional name, X/Y/W/H sliders, Move up/down, Primary marker (first
+  enabled effective region), Apply/Reset, backend validation errors surfaced.
+  `MAX_REGIONS = 8` enforced; Add disabled at the cap.
+- save/apply never starts/stops/restarts OCR or the renderer, and does not live
+  reload a running worker: changes apply on the next explicit OCR start. The UI
+  states this.
+- The single-block overlay remains Primary-only via the v1 compatibility
+  projection; secondary regions are recognized in backend v2 state but not rendered
+  yet (multi-block renderer deferred).
+- Known deferred: device-observed slight update latency (no cadence/consensus/
+  stale tuning here); legacy aggregate scheduler counters; region preview still
+  draws the legacy boxes, not v2 regions; legacy box/ROI frontend code retained as
+  dead-but-compiling code for a later cleanup gate.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

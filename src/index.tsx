@@ -18,6 +18,7 @@ import {
 import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { FaSearchPlus } from "react-icons/fa";
 import { OCRDiagnosticSection } from "./components/OCRDiagnostic";
+import { RegionEditorSection } from "./components/RegionEditor";
 
 type BoxState = {
   id: string;
@@ -123,7 +124,7 @@ function validateRoiDraft(draft: RoiDraft): string {
 
 const LANGUAGES = [
   { value: "chi_sim+eng", label: "中英 chi_sim+eng" },
-  { value: "chi_sim", label: "简体 chi_sim" },
+  { value: "chi_sim", label: "简�?chi_sim" },
   { value: "chi_tra", label: "繁体 chi_tra" },
   { value: "eng", label: "英文 eng" },
 ];
@@ -568,7 +569,9 @@ function Content() {
 
       <OCRDiagnosticSection />
 
-      <PanelSection title="Recognition Area">
+      <RegionEditorSection />
+
+      <PanelSection title="Legacy Recognition Area (Advanced)">
         <PanelSectionRow>
           <div style={statusStyle}>
             <div>Source: {roiSource}</div>
@@ -739,7 +742,7 @@ function Content() {
         </PanelSectionRow>
       </PanelSection>
 
-      <PanelSection title="Regions">
+      <PanelSection title="Legacy Regions (Advanced)">
         {boxes.length === 0 ? (
           <PanelSectionRow>
             <div style={hintStyle}>Press "+ Add region" to create a default 300x60 OCR area.</div>
@@ -983,3 +986,4 @@ export default definePlugin(() => {
     },
   };
 });
+
