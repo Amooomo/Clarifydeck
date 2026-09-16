@@ -202,6 +202,10 @@ class OverlayDeliveryObserver:
         self._delivery.set_session(worker_session_id)
 
     def on_accepted_event(self, event: Any) -> None:
+        # Defensive Phase 2L.3 guard: region-tagged (v2) events are not routed to
+        # the legacy single-block overlay until multi-block rendering exists.
+        if getattr(event, "region_id", None) is not None:
+            return
         action = self._coordinator.consume(event)
         if action is not None:
             self._delivery.submit(action)

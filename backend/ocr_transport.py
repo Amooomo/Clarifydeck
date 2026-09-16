@@ -32,6 +32,18 @@ class StableOCRState:
     timestamp_monotonic: Optional[float] = None
 
 
+def _state_dict(state: StableOCRState) -> dict:
+    return {
+        "worker_session_id": state.worker_session_id,
+        "last_event_seq": state.last_event_seq,
+        "kind": state.kind,
+        "text": state.text,
+        "confidence": state.confidence,
+        "source_seq": state.source_seq,
+        "timestamp_monotonic": state.timestamp_monotonic,
+    }
+
+
 @dataclass(frozen=True)
 class AcceptedStableTextEvent:
     """Immutable view of an already-accepted transport event.
@@ -40,6 +52,9 @@ class AcceptedStableTextEvent:
     never see malformed or rejected input. Exact text is preserved (no
     normalization). Pure backend transport view: no ocr.stabilizer or overlay
     dependency.
+
+    ``region_id`` is None for v1 (single-region) and the exact stable ID for v2.
+    ``transport_version`` records which schema produced the event.
     """
 
     worker_session_id: str
@@ -49,6 +64,8 @@ class AcceptedStableTextEvent:
     confidence: Optional[float]
     source_seq: Optional[int]
     timestamp_monotonic: Optional[float]
+    region_id: Optional[str] = None
+    transport_version: int = 1
 
 
 class OCRTransportObserver(Protocol):
@@ -85,6 +102,8 @@ class OCRTransportReceiver:
     ) -> None:
         self._session_id = session_id or uuid.uuid4().hex
         self._state = StableOCRState(worker_session_id=self._session_id)
+        self._regions: dict[str, StableOCRState] = {}
+        self._last_event_seq = 0
         self._stats = OCRTransportStats()
         self._observer = observer
 
@@ -100,12 +119,18 @@ class OCRTransportReceiver:
         """
         self._session_id = session_id or uuid.uuid4().hex
         self._state = StableOCRState(worker_session_id=self._session_id)
+        self._regions = {}
+        self._last_event_seq = 0
         self._stats = OCRTransportStats()
         self._notify_begin_session(self._session_id)
         return self._state
 
     def handle_line(self, line: str) -> bool:
-        """Parse one line. Returns True if accepted (state updated)."""
+        """Parse one line. Returns True if accepted (state updated).
+
+        ``event_seq`` ordering is worker-global across v1/v2 and all regions.
+        v1 updates the legacy latest state; v2 updates the per-region map only.
+        """
         self._stats.transport_messages_received += 1
         try:
             envelope = decode_envelope(line)
@@ -114,7 +139,7 @@ class OCRTransportReceiver:
             self._stats.last_transport_error = exc.code
             return False
 
-        if envelope.event_seq <= self._state.last_event_seq:
+        if envelope.event_seq <= self._last_event_seq:
             self._stats.transport_out_of_order += 1
             self._stats.last_transport_error = "out_of_order"
             return False
@@ -123,7 +148,9 @@ class OCRTransportReceiver:
             self._stats.transport_text_events += 1
         else:
             self._stats.transport_clear_events += 1
-        self._state = StableOCRState(
+        self._last_event_seq = envelope.event_seq
+
+        committed = StableOCRState(
             worker_session_id=self._session_id,
             last_event_seq=envelope.event_seq,
             kind=envelope.kind,
@@ -132,6 +159,11 @@ class OCRTransportReceiver:
             source_seq=envelope.source_seq,
             timestamp_monotonic=envelope.timestamp_monotonic,
         )
+        if envelope.region_id is not None:
+            # v2: per-region authoritative state; legacy latest state untouched.
+            self._regions[envelope.region_id] = committed
+        else:
+            self._state = committed
         self._stats.last_transport_error = None
         # State is committed before notifying the observer so downstream overlay
         # problems can never invalidate OCR correctness.
@@ -144,9 +176,20 @@ class OCRTransportReceiver:
                 confidence=envelope.confidence,
                 source_seq=envelope.source_seq,
                 timestamp_monotonic=envelope.timestamp_monotonic,
+                region_id=envelope.region_id,
+                transport_version=envelope.version,
             )
         )
         return True
+
+    # -- per-region authoritative state ------------------------------------
+
+    def latest_stable_text_by_region(self, region_id: str) -> Optional[dict]:
+        state = self._regions.get(str(region_id))
+        return _state_dict(state) if state is not None else None
+
+    def latest_stable_text_regions(self) -> dict:
+        return {region_id: _state_dict(state) for region_id, state in self._regions.items()}
 
     # -- observer seam -----------------------------------------------------
 
@@ -181,16 +224,7 @@ class OCRTransportReceiver:
         return self._state
 
     def state_dict(self) -> dict:
-        state = self._state
-        return {
-            "worker_session_id": state.worker_session_id,
-            "last_event_seq": state.last_event_seq,
-            "kind": state.kind,
-            "text": state.text,
-            "confidence": state.confidence,
-            "source_seq": state.source_seq,
-            "timestamp_monotonic": state.timestamp_monotonic,
-        }
+        return _state_dict(self._state)
 
     def status(self) -> dict:
         state = self._state

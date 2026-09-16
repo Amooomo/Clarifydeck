@@ -1420,7 +1420,39 @@ stabilizer's `observe([])` clear event carries `source_seq=<frame seq>`, but the
 transport `decode_envelope` requires `source_seq is None` for `kind="clear"`, so
 that clear is rejected by the backend receiver. Only `tick`-emitted clears (which
 use `source_seq=None`) are accepted. This is a transport/stabilizer contract
-mismatch, outside 2L.2's frozen scope.
+mismatch, outside 2L.2's frozen scope. **Resolved in Phase 2L.3 (see below).**
+
+## Phase 2L.3 — Region-Tagged StableText Transport v2
+
+Status: LOCAL PASS / DEVICE NOT APPLICABLE
+
+- v1 remains supported and is the production default; the production worker still
+  emits v1 single-region JSONL.
+- v2 adds a required `region_id` (non-empty string, `1..128` chars, no
+  normalization). One line = one event; no arrays.
+- `event_seq` is worker-global: one strict increasing sequence across v1/v2 and
+  all regions (no `region_event_seq`).
+- `source_seq` is capture/frame metadata and may repeat across regions from the
+  same frame; it is not used for transport ordering.
+- clear fields are canonical: `text=""`, `confidence=None`, `source_seq=None`.
+- backend `OCRTransportReceiver` keeps legacy latest stable state (v1) separate
+  from a new per-region authoritative map (`region_id -> latest state`); clear is
+  per-region state, not region deletion; `begin_session` resets both.
+- `AcceptedStableTextEvent` gains `region_id` (None for v1) and
+  `transport_version`; the optional observer receives exact region identity.
+- legacy latest stable text (`state`/`state_dict`/`status`) stays v1-based and is
+  not redefined as "last event from any region".
+- defensive guard: the production single-block overlay adapter
+  (`OverlayDeliveryObserver`) ignores region-tagged (v2) events until multi-block
+  rendering exists; no renderer call.
+- renderer/protocol/QAM/frontend unchanged; no multi-region scheduler; no
+  multi-region worker switch.
+
+Resolved clear mismatch: `OCRStabilizer._maybe_clear` now always emits
+`source_seq=None`, so both `observe([])` and `tick()` clear paths are canonical at
+source. `ocr.transport.envelope_from_event` additionally canonicalizes clear at
+the transport boundary (defense in depth), so no producer can emit a second clear
+shape. Stale timing, consensus, and exactly-once behavior are unchanged.
 
 ## Phase 2C.2 Wayland environment
 

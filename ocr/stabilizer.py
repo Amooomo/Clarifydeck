@@ -163,7 +163,7 @@ class OCRStabilizer:
         if candidate is not None:
             return self._accept_candidate(candidate, sequence, now)
         self._last_observation_had_text = False
-        return self._maybe_clear(sequence, now)
+        return self._maybe_clear(now)
 
     def tick(self, timestamp_monotonic: Optional[float] = None) -> list:
         """Advance time for a skipped-OCR frame (unchanged ROI).
@@ -178,7 +178,7 @@ class OCRStabilizer:
             if self._last_emitted_text is not None:
                 self._last_activity = now
             return []
-        return self._maybe_clear(None, now)
+        return self._maybe_clear(now)
 
     def _build_candidate(self, lines, sequence, now) -> Optional[OCRCandidate]:
         kept = []
@@ -235,7 +235,7 @@ class OCRStabilizer:
             )
         ]
 
-    def _maybe_clear(self, sequence, now) -> list:
+    def _maybe_clear(self, now) -> list:
         if self._last_emitted_text is None or self._clear_emitted or self._last_activity is None:
             return []
         if now - self._last_activity < self._stale_timeout_sec:
@@ -248,7 +248,7 @@ class OCRStabilizer:
                 kind="clear",
                 text="",
                 confidence=None,
-                source_seq=sequence,
+                source_seq=None,
                 timestamp_monotonic=now,
             )
         ]
