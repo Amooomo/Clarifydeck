@@ -50,11 +50,15 @@ from ocr import (  # noqa: E402
     OCRStabilizer,
     StabilizerConfigError,
     activate_plugin_ocr_runtime,
+    normalize_line,
     predict_det_geometry,
     probe_report_lines,
     probe_runtime,
 )
 from ocr.transport import encode_envelope, envelope_from_event  # noqa: E402
+
+# Bounded cap for opt-in OCR evidence diagnostics (never unbounded logs).
+MAX_EVIDENCE_LINES = 20
 
 
 class OCRState(str, Enum):
@@ -208,6 +212,7 @@ class OCRDiagnostic:
         self.gate = gate
         self.machine_stream = machine_stream
         self._stable_event_seq = 0
+        self._last_ocr_trigger: Optional[str] = None
         self._debug_resolver = None
         self._debug_switch_roi = None
         self._debug_switch_after = None
@@ -256,6 +261,77 @@ class OCRDiagnostic:
             else:
                 print("[ocr-stable] emit=clear", flush=True)
         self._emit_stable_events(events)
+        self._emit_ocr_evidence(result)
+
+    def _diagnostic_enabled(self) -> bool:
+        return bool(getattr(self.args, "diagnostic_ocr_evidence", False))
+
+    def _emit_ocr_evidence(self, result) -> None:
+        """Bounded opt-in evidence for one real OCR attempt (stderr only).
+
+        Records exactly what OCR produced and what candidate reached the
+        stabilizer, so true text vs. false positives can be compared on device.
+        Never writes to stdout (machine JSONL) and never serializes images.
+        """
+        if not self._diagnostic_enabled():
+            return
+        stabilizer = self.stabilizer
+        candidate = stabilizer.last_observed_candidate if stabilizer is not None else None
+        min_conf = stabilizer.min_line_confidence if stabilizer is not None else 0.0
+        lines_out = []
+        usable = 0
+        for line in result.lines:
+            confidence = getattr(line, "confidence", None)
+            box = getattr(line, "box", None)
+            lines_out.append(
+                {
+                    "text": getattr(line, "text", ""),
+                    "confidence": confidence,
+                    "box": [list(point) for point in box] if box else None,
+                }
+            )
+            if (
+                confidence is not None
+                and confidence >= min_conf
+                and normalize_line(getattr(line, "text", ""))
+            ):
+                usable += 1
+        truncated = len(lines_out) > MAX_EVIDENCE_LINES
+        record = {
+            "frame_seq": result.sequence,
+            "timestamp_monotonic": time.monotonic(),
+            "roi_pixel_size": [result.roi_width, result.roi_height],
+            "change_gate_enabled": self.gate is not None,
+            "ocr_trigger_reason": self._last_ocr_trigger,
+            "real_ocr_attempt": True,
+            "raw_line_count": len(lines_out),
+            "usable_line_count": usable,
+            "lines": lines_out[:MAX_EVIDENCE_LINES],
+            "lines_truncated": truncated,
+            "candidate_text": candidate.text if candidate is not None else None,
+            "candidate_confidence": candidate.confidence if candidate is not None else None,
+            "candidate_source_seq": candidate.source_seq if candidate is not None else None,
+            "no_usable_text": candidate is None,
+        }
+        try:
+            print(f"[ocr-evidence] {json.dumps(record, ensure_ascii=False)}", file=sys.stderr, flush=True)
+        except Exception as exc:  # diagnostics must never break the OCR loop
+            print(f"[ocr-evidence] emit_error detail={exc}", file=sys.stderr, flush=True)
+
+    def _emit_ocr_schedule(self, reason: str) -> None:
+        """Bounded opt-in skipped-frame record (distinct from OCR evidence)."""
+        if not self._diagnostic_enabled():
+            return
+        record = {
+            "frame_seq": None,
+            "change_gate_enabled": True,
+            "real_ocr_attempt": False,
+            "reason": reason,
+        }
+        try:
+            print(f"[ocr-schedule] {json.dumps(record, ensure_ascii=False)}", file=sys.stderr, flush=True)
+        except Exception as exc:
+            print(f"[ocr-schedule] emit_error detail={exc}", file=sys.stderr, flush=True)
 
     def _emit_stable_events(self, events) -> None:
         """Write stabilizer events to the machine JSONL stream (transport).
@@ -472,6 +548,7 @@ class OCRDiagnostic:
                 # Skipped OCR is NOT an empty OCR result; advance time only.
                 # A clear can still legitimately fire here when an earlier real
                 # no-text observation set the stale clock; forward it to transport.
+                self._emit_ocr_schedule(decision.reason)
                 if self.stabilizer is not None:
                     events = self.stabilizer.tick(time.monotonic())
                     if events:
@@ -480,6 +557,7 @@ class OCRDiagnostic:
                                 print("[ocr-stable] emit=clear", flush=True)
                         self._emit_stable_events(events)
                 return
+            self._last_ocr_trigger = decision.reason
             self.roi_width = roi_frame.width
             self.roi_height = roi_frame.height
         else:
@@ -490,6 +568,7 @@ class OCRDiagnostic:
                 app_id=self.args.app_id,
                 resolver=self.resolver,
             )
+            self._last_ocr_trigger = "ungated"
             self.roi_width = roi_frame.width
             self.roi_height = roi_frame.height
         timings["capture_wait_ms"] = wait_ms
@@ -912,6 +991,11 @@ def main(argv=None) -> int:
     parser.add_argument("--consensus-required", type=int, default=2)
     parser.add_argument("--history-size", type=int, default=3)
     parser.add_argument("--stale-timeout-sec", type=float, default=2.0)
+    parser.add_argument(
+        "--diagnostic-ocr-evidence",
+        action="store_true",
+        help="emit bounded per-OCR-attempt evidence records to stderr (diagnostics only)",
+    )
     parser.add_argument("--change-gate", action="store_true", help="skip OCR when the ROI is unchanged")
     parser.add_argument("--force-ocr-interval-sec", type=float, default=3.0)
     parser.add_argument(

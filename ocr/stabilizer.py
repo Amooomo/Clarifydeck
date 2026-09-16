@@ -104,6 +104,7 @@ class OCRStabilizer:
         self._clear_emitted = False
         self._last_activity: Optional[float] = None
         self._last_candidate: Optional[OCRCandidate] = None
+        self._last_observed_candidate: Optional[OCRCandidate] = None
         self._last_consensus = 0
         self._last_observation_had_text = False
         self._stats = StabilizerStats()
@@ -158,6 +159,7 @@ class OCRStabilizer:
         self._stats.raw_frames += 1
 
         candidate = self._build_candidate(lines, sequence, now)
+        self._last_observed_candidate = candidate
         if candidate is not None:
             return self._accept_candidate(candidate, sequence, now)
         self._last_observation_had_text = False
@@ -259,6 +261,7 @@ class OCRStabilizer:
         self._clear_emitted = False
         self._last_activity = None
         self._last_candidate = None
+        self._last_observed_candidate = None
         self._last_consensus = 0
         self._last_observation_had_text = False
         self._stats = StabilizerStats()
@@ -269,6 +272,19 @@ class OCRStabilizer:
     @property
     def last_candidate(self) -> Optional[OCRCandidate]:
         return self._last_candidate
+
+    @property
+    def last_observed_candidate(self) -> Optional[OCRCandidate]:
+        """Candidate built for the most recent ``observe`` (None on real no-text).
+
+        Unlike ``last_candidate`` this is reset to None when an observation yields
+        no usable candidate; used only for opt-in diagnostics.
+        """
+        return self._last_observed_candidate
+
+    @property
+    def min_line_confidence(self) -> float:
+        return self._min_line_confidence
 
     @property
     def last_consensus(self) -> int:

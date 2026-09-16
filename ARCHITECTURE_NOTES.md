@@ -1249,6 +1249,44 @@ StableTextEvent(clear)
 -> overlay hide
 -> later new stable text restores overlay
 
+### Phase 2K.2.2 — OCR false-positive evidence instrumentation
+
+Status: LOCAL PASS / DEVICE SAMPLE COLLECTION PENDING
+
+Device finding:
+- visually empty game regions still produced OCR texts such as `w`, `中`, `10`
+- therefore stale clear could not be exercised reliably
+- no filter heuristic has been added yet
+
+Added:
+- opt-in OCR evidence diagnostics (`--diagnostic-ocr-evidence`, default **OFF**),
+  emitted as one bounded `[ocr-evidence] {json}` record per **real OCR attempt**
+  to **stderr** (never stdout). Fields: `frame_seq`, `timestamp_monotonic`,
+  `roi_pixel_size`, `change_gate_enabled`, `ocr_trigger_reason`,
+  `real_ocr_attempt`, `raw_line_count`, `usable_line_count`, `lines`
+  (`text`/`confidence`/`box` in ROI-local pixels, capped at
+  `MAX_EVIDENCE_LINES` with `lines_truncated`), `candidate_text`,
+  `candidate_confidence`, `candidate_source_seq`, `no_usable_text`.
+- skipped change-gated frames emit a distinct `[ocr-schedule]` record with
+  `real_ocr_attempt: false` (never mixed with OCR evidence).
+- `OCRStabilizer` gains read-only `last_observed_candidate` (None on real no-text)
+  and `min_line_confidence` accessors used only for diagnostics; the candidate
+  reaching the stabilizer is now directly observable.
+- normal production launch from `main.py` never enables diagnostics.
+
+Frozen:
+- diagnostics OFF by default
+- stdout JSONL unchanged (evidence goes to stderr only)
+- no OCR threshold/filter behavior changed
+- no stabilizer/transport/overlay/renderer/QAM behavior changed
+
+Deferred:
+- Change Gate QAM display resets to OFF after QAM reopen while the OCR worker
+  stays RUNNING; it is unclear whether this is a frontend local-toggle reset or a
+  real backend/effective-state mismatch. Not fixed here; a later gate will decide
+  whether QAM should show the configured next-start value, the running effective
+  value, or both.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

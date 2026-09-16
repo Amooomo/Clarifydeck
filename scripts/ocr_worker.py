@@ -79,6 +79,11 @@ def _parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--app-id", default=None)
     parser.add_argument("--change-gate", action="store_true")
     parser.add_argument("--force-ocr-interval-sec", type=float, default=3.0)
+    parser.add_argument(
+        "--diagnostic-ocr-evidence",
+        action="store_true",
+        help="emit bounded per-OCR-attempt evidence records to stderr (diagnostics only)",
+    )
     parser.add_argument("--min-line-confidence", type=float, default=0.70)
     parser.add_argument("--consensus-required", type=int, default=2)
     parser.add_argument("--history-size", type=int, default=3)
@@ -116,6 +121,7 @@ def _diagnostic_args(args: argparse.Namespace) -> argparse.Namespace:
         debug_reset_scheduler_after_sec=None,
         stable_output=True,
         emit_stable_jsonl=True,
+        diagnostic_ocr_evidence=args.diagnostic_ocr_evidence,
     )
 
 
