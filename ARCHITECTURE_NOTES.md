@@ -1287,6 +1287,106 @@ Deferred:
   whether QAM should show the configured next-start value, the running effective
   value, or both.
 
+## Phase 2L.1 — Multi-Region Recognition Foundation
+
+Status: LOCAL PASS / DEVICE NOT APPLICABLE
+
+Purpose: audit the existing Regions UI, and establish the authoritative
+multi-region configuration model + persistence contract. No multi-region OCR
+execution and no multi-block overlay rendering yet.
+
+### Existing QAM Regions section audit
+
+- **Add region:** `add_box` creates an in-memory `BoxState` (`uuid4().hex[:8]`,
+  screen-pixel x/y/w/h) in `ClarifyDeckEngine.boxes`; emits `boxes_changed`. This
+  is the legacy Phase-1 box editor for the old in-plugin capture loop
+  (`start_plugin`/`_capture_loop`/`run_ocr_now`), NOT the production OCR worker.
+- **Remove selected:** `remove_box` pops the in-memory box. Same legacy path.
+- **frontend region state:** `useClarifyDeckState().boxes` via
+  `list_boxes`/`add_box`/`update_box`/`remove_box`; also drawn by the QAM region
+  preview.
+- **persistence:** NO — the `BoxState` list is in-memory only.
+- **backend RPC support:** yes, for the legacy box editor only.
+- **production OCR influence:** NO — `scripts/ocr_worker.py` resolves exactly one
+  authoritative ROI through `capture/recognition_roi.py`; the box list does not
+  affect the OCR worker/StableTextEvent pipeline.
+- **stable IDs currently exist:** NO for the legacy boxes (session-only, not
+  persisted).
+
+### Existing single-ROI audit
+
+- legacy file/schema: `recognition_roi.json` v1
+  (`{"version":1,"default_roi":{x,y,width,height}|null,"games":{"<app_id>":{"roi":{...}}}}`),
+  strict validation, atomic temp+`os.replace` write.
+- current precedence: per-game user > game profile preset > global user > built-in
+  default (`ActiveROIResolver`).
+- preset semantics: built-in `ROIProfileStore` map (`DEFAULT_PROFILE_STORE`) — a
+  built-in authoring shortcut, not user-persisted authority.
+- current production resolver: `capture/recognition_roi.resolve_active_recognition_roi`
+  / `extract_recognition_roi` (single ROI).
+- current ROI RPCs: `roi_config_get`/`roi_config_set`/`roi_config_reset`/
+  `roi_config_preview` (unchanged by 2L.1).
+
+### New multi-region model
+
+- module: `capture/recognition_regions.py` (pure stdlib).
+- `RecognitionRegion`: `region_id`, `x`, `y`, `w`, `h`, `enabled`, `name`
+  (optional). Normalized `0..1` geometry, strict validation (rejects, never
+  clamps; `MIN_ROI_SIZE = 0.02`, `x+w<=1`, `y+h<=1`, finite only).
+- region_id strategy: opaque stable string (UUID assigned on first explicit v2
+  write); never array-index-derived. Legacy fallback uses deterministic
+  `legacy-primary` / `builtin-default`.
+- `MAX_REGIONS = 8` (bounded; OCR cost grows with enabled regions).
+- `RecognitionRegionSet`: ordered, unique IDs, bounded count; `enabled_regions()`
+  and transitional `primary()` (first enabled).
+- enabled semantics: a disabled region is valid and round-trips; an empty/fully
+  disabled v2 set is valid (future OCR simply has no work) and does NOT
+  auto-create a full-frame region.
+
+### Persistence
+
+- schema version: `2` (evolves the same `recognition_roi.json`).
+- global format: `{"global": {"regions": [...]}}`.
+- per-game format: `{"per_game": {"<app_id>": {"regions": [...]}}}`.
+- atomic write: temp file + `os.fsync` + `os.replace` (retained).
+- malformed config behavior: top-level malformed/unsupported version → safe empty
+  config + `last_error`; a region list with any invalid entry is rejected whole
+  (no partially trusted geometry), so resolution falls back to a trusted lower
+  layer. An explicit empty list is valid.
+
+### Compatibility
+
+- legacy single ROI read: v1 files are read into a legacy view; effective
+  resolution falls back to it with exact geometry.
+- migration behavior: read is side-effect free; `adopt_effective_regions()`
+  assigns fresh stable UUIDs and persists on first explicit v2 write.
+- legacy APIs preserved: `roi_config_*` RPCs and `ROIConfigStore` are unchanged
+  (production RPC wiring to the v2 store is deferred so the v1 file is never
+  clobbered by two stores).
+- primary-region rule: transitional only — first enabled effective region; not a
+  future priority semantic. No automatic reordering.
+- production OCR still single-region: YES.
+
+### Why multi-region next (false-positive evidence relationship)
+
+2K.2.2 device evidence showed visually empty areas can produce very high
+confidence false positives (`01` ~0.999, `hils` ~0.867, `X` ~0.708) while valid
+short text can be small (`交谈`, `Ⅱ`). Confidence/size-only suppression is
+therefore unsafe as a primary fix; user-defined regions reduce irrelevant visual
+input before OCR. The 2K.2.2 diagnostics are retained and remain OFF by default.
+
+### Explicitly NOT changed
+
+- StableTextEvent / JSONL schema (no `region_id` yet)
+- OCR multi-region execution (still one transitional primary ROI crop)
+- `ocr/stabilizer.py` behavior, transport schema, overlay protocol/renderer,
+  `overlay_manager.py`, `backend/overlay_*`
+- frontend multi-region editor (no QAM redesign)
+- translation (absent)
+
+Deferred (unchanged from 2K.2.2): Change Gate QAM toggle display resets after QAM
+reopen while OCR may still run with its start-time configuration.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so
