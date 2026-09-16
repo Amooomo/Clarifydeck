@@ -8,12 +8,15 @@ protocol.
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
 
 MAX_MESSAGE_BYTES = 64 * 1024
 MAX_TEXT_CHARS = 4096
+MAX_PREVIEW_REGIONS = 8
+MAX_REGION_LABEL_CHARS = 32
 
 DEFAULT_FONT_SIZE = 24
 DEFAULT_BACKGROUND_ALPHA = 0.55
@@ -77,3 +80,54 @@ def decode_message(line: bytes) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def sanitize_preview_regions(value: Any) -> list[dict[str, Any]]:
+    """Validate/normalize a region-preview payload. Never raises; drops bad entries."""
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in value[:MAX_PREVIEW_REGIONS]:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            x = float(entry["x"])
+            y = float(entry["y"])
+            w = float(entry["w"])
+            h = float(entry["h"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not all(math.isfinite(v) for v in (x, y, w, h)):
+            continue
+        if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and 0.0 < w <= 1.0 and 0.0 < h <= 1.0):
+            continue
+        if x + w > 1.0001 or y + h > 1.0001:
+            continue
+        label = entry.get("label")
+        if not isinstance(label, str):
+            label = ""
+        region_id = entry.get("region_id")
+        out.append(
+            {
+                "region_id": str(region_id)[:64] if region_id is not None else "",
+                "x": x,
+                "y": y,
+                "w": w,
+                "h": h,
+                "selected": bool(entry.get("selected", False)),
+                "primary": bool(entry.get("primary", False)),
+                "enabled": bool(entry.get("enabled", True)),
+                "label": label[:MAX_REGION_LABEL_CHARS],
+            }
+        )
+    return out
+
+
+def preview_pixel_rect(region: dict[str, Any], width: int, height: int) -> tuple[float, float, float, float]:
+    """Normalized region -> pixel rect on the renderer surface."""
+    return (
+        float(region["x"]) * width,
+        float(region["y"]) * height,
+        float(region["w"]) * width,
+        float(region["h"]) * height,
+    )

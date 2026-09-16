@@ -644,6 +644,35 @@ class ClarifyDeckEngine:
         except Exception as exc:
             decky.logger.error(f"overlay hide failed: {exc}")
 
+    # -- Phase 2L.8.2 explicit region preview (renderer-based) --------------
+
+    async def set_region_preview_enabled(self, enabled: bool) -> dict[str, Any]:
+        if self._role != "leader" or self._overlay is None:
+            return {"ok": False, "error": "overlay_unavailable"}
+        try:
+            return await self._overlay.set_region_preview_enabled(enabled)
+        except Exception as exc:
+            decky.logger.error(f"region preview enable failed: {exc}")
+            return {"ok": False, "error": "region_preview_failed", "detail": str(exc)}
+
+    async def set_region_preview(self, regions: Optional[list] = None) -> dict[str, Any]:
+        if self._overlay is None:
+            return {"ok": False, "error": "overlay_unavailable"}
+        try:
+            return await self._overlay.set_region_preview(regions or [])
+        except Exception as exc:
+            decky.logger.error(f"region preview update failed: {exc}")
+            return {"ok": False, "error": "region_preview_failed", "detail": str(exc)}
+
+    async def clear_region_preview(self) -> dict[str, Any]:
+        if self._overlay is None:
+            return {"ok": False, "error": "overlay_unavailable"}
+        try:
+            return await self._overlay.clear_region_preview()
+        except Exception as exc:
+            decky.logger.error(f"region preview clear failed: {exc}")
+            return {"ok": False, "error": "region_preview_failed", "detail": str(exc)}
+
     def capture_test(self, mode: str = "base_plane_only", output: str = "") -> dict[str, Any]:
         """One-shot capture isolation test. Never starts a loop, OCR or overlay."""
         if mode not in ("base_plane_only", "all_real_layers", "full_composition", "screen_buffer"):
@@ -1481,6 +1510,15 @@ class Plugin:
 
     async def get_overlay_status(self) -> Optional[dict[str, Any]]:
         return get_engine().overlay_status()
+
+    async def set_region_preview_enabled(self, enabled: bool) -> dict[str, Any]:
+        return await get_engine().set_region_preview_enabled(enabled)
+
+    async def set_region_preview(self, regions: Optional[list] = None) -> dict[str, Any]:
+        return await get_engine().set_region_preview(regions or [])
+
+    async def clear_region_preview(self) -> dict[str, Any]:
+        return await get_engine().clear_region_preview()
 
     async def capture_test_base_plane(self, output: str = "") -> dict[str, Any]:
         loop = asyncio.get_event_loop()

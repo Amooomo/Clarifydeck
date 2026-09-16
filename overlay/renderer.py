@@ -162,6 +162,8 @@ def _bind_x11() -> None:
     libX11.XQueryTextExtents.restype = ctypes.c_int
     libX11.XDrawString.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
     libX11.XDrawString.restype = ctypes.c_int
+    libX11.XDrawRectangle.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_uint]
+    libX11.XDrawRectangle.restype = ctypes.c_int
     libX11.XPending.argtypes = [ctypes.c_void_p]
     libX11.XPending.restype = ctypes.c_int
     libX11.XNextEvent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
@@ -243,6 +245,12 @@ def _bind_cairo() -> None:
     libcairo.cairo_show_text.restype = None
     libcairo.cairo_text_extents.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(cairo_text_extents_t)]
     libcairo.cairo_text_extents.restype = None
+    libcairo.cairo_stroke.argtypes = [ctypes.c_void_p]
+    libcairo.cairo_stroke.restype = None
+    libcairo.cairo_set_line_width.argtypes = [ctypes.c_void_p, ctypes.c_double]
+    libcairo.cairo_set_line_width.restype = None
+    libcairo.cairo_set_dash.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double), ctypes.c_int, ctypes.c_double]
+    libcairo.cairo_set_dash.restype = None
 
 
 def resolve_cjk_font() -> str:
@@ -279,6 +287,7 @@ class OverlayRenderer:
         self.font_family = "sans"
         self.visible = False
         self.text = ""
+        self.preview_regions: list = []
 
     def log(self, message: str) -> None:
         sys.stderr.write(f"[renderer] {message}\n")
@@ -351,9 +360,13 @@ class OverlayRenderer:
         libcairo.cairo_set_source_rgba(self.cairo, 0.0, 0.0, 0.0, 0.0)
         libcairo.cairo_paint(self.cairo)
         libcairo.cairo_set_operator(self.cairo, 2)  # OVER
-        if not self.visible or not self.text:
-            libcairo.cairo_surface_flush(self.cairo_surface)
-            return
+        if self.visible and self.text:
+            self._draw_text_cairo()
+        if self.preview_regions:
+            self._draw_preview_cairo()
+        libcairo.cairo_surface_flush(self.cairo_surface)
+
+    def _draw_text_cairo(self) -> None:
         lines = self.text.split("\n") or [""]
         line_h = self.font_size * 1.3
         padding = 12.0
@@ -379,13 +392,69 @@ class OverlayRenderer:
             ty = box_y + padding + self.font_size + index * line_h
             libcairo.cairo_move_to(self.cairo, tx, ty)
             libcairo.cairo_show_text(self.cairo, line.encode("utf-8"))
-        libcairo.cairo_surface_flush(self.cairo_surface)
+
+    def _draw_preview_cairo(self) -> None:
+        for region in self.preview_regions:
+            left, top, width, height = protocol.preview_pixel_rect(region, self.width, self.height)
+            alpha = 1.0 if region["enabled"] else 0.4
+            if region["selected"]:
+                libcairo.cairo_set_source_rgba(self.cairo, 1.0, 0.85, 0.0, alpha)
+                libcairo.cairo_set_line_width(self.cairo, 4.0)
+            elif region["primary"]:
+                libcairo.cairo_set_source_rgba(self.cairo, 0.4, 0.85, 1.0, alpha)
+                libcairo.cairo_set_line_width(self.cairo, 3.0)
+            else:
+                libcairo.cairo_set_source_rgba(self.cairo, 0.85, 0.85, 0.85, alpha)
+                libcairo.cairo_set_line_width(self.cairo, 2.0)
+            if region["enabled"]:
+                libcairo.cairo_set_dash(self.cairo, None, 0, 0.0)
+            else:
+                dashes = (ctypes.c_double * 2)(6.0, 6.0)
+                libcairo.cairo_set_dash(self.cairo, dashes, 2, 0.0)
+            libcairo.cairo_rectangle(self.cairo, left, top, width, height)
+            libcairo.cairo_stroke(self.cairo)
+            libcairo.cairo_set_dash(self.cairo, None, 0, 0.0)
+            label = region.get("label") or ""
+            if label:
+                libcairo.cairo_select_font_face(self.cairo, self.font_family.encode(), 0, 0)
+                libcairo.cairo_set_font_size(self.cairo, 14.0)
+                libcairo.cairo_set_source_rgba(self.cairo, 1.0, 1.0, 1.0, alpha)
+                libcairo.cairo_move_to(self.cairo, left + 2.0, max(14.0, top - 4.0))
+                libcairo.cairo_show_text(self.cairo, label.encode("utf-8"))
 
     def _draw_xlib(self) -> None:
         libX11.XSetForeground(self.dpy, self.gc, 0x00000000)
         libX11.XFillRectangle(self.dpy, self.win, self.gc, 0, 0, self.width, self.height)
-        if not self.visible or not self.text:
-            return
+        if self.visible and self.text:
+            self._draw_text_xlib()
+        if self.preview_regions:
+            self._draw_preview_xlib()
+
+    def _draw_preview_xlib(self) -> None:
+        for region in self.preview_regions:
+            left, top, width, height = protocol.preview_pixel_rect(region, self.width, self.height)
+            x = int(left)
+            y = int(top)
+            w = max(1, int(width))
+            h = max(1, int(height))
+            if region["selected"]:
+                color = 0xFFFFD800
+            elif region["primary"]:
+                color = 0xFF66D9FF
+            else:
+                color = 0xFFD9D9D9
+            if not region["enabled"]:
+                color = 0x80D9D9D9
+            libX11.XSetForeground(self.dpy, self.gc, color)
+            libX11.XDrawRectangle(self.dpy, self.win, self.gc, x, y, w, h)
+            if region["selected"]:
+                libX11.XDrawRectangle(self.dpy, self.win, self.gc, max(0, x - 1), max(0, y - 1), w + 2, h + 2)
+            label = region.get("label") or ""
+            if label:
+                data = label.encode("utf-8", errors="replace")
+                libX11.XDrawString(self.dpy, self.win, self.gc, x + 2, max(12, y - 4), data, len(data))
+
+    def _draw_text_xlib(self) -> None:
         lines = self.text.split("\n") or [""]
         line_h = self.font_size + 8
         box_w = 300
@@ -593,6 +662,24 @@ def serve(renderer: OverlayRenderer, sock_path: Path, parent_pid: int = 0) -> in
                         renderer.draw()
                         if renderer.debug:
                             renderer.log(f"update: {text!r}")
+                        continue
+                    if action == "set_region_preview":
+                        renderer.preview_regions = protocol.sanitize_preview_regions(payload.get("regions"))
+                        renderer.draw()
+                        if renderer.debug:
+                            rects = [
+                                protocol.preview_pixel_rect(region, renderer.width, renderer.height)
+                                for region in renderer.preview_regions
+                            ]
+                            renderer.log(
+                                f"preview count={len(renderer.preview_regions)} "
+                                f"surface={renderer.width}x{renderer.height} rects={rects}"
+                            )
+                        continue
+                    if action == "clear_region_preview":
+                        renderer.preview_regions = []
+                        renderer.draw()
+                        continue
     finally:
         selector.close()
         server.close()

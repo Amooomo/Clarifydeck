@@ -191,6 +191,11 @@ class OverlayManager:
         self._visible = False
         self._last_error: Optional[str] = None
         self._log_handle = None
+        # Renderer ownership: the shared renderer process stays alive while EITHER
+        # the persistent text overlay OR the region preview needs it.
+        self._text_enabled = False
+        self._preview_enabled = False
+        self._preview_regions: list = []
 
     # -- identity ----------------------------------------------------------
 
@@ -223,13 +228,15 @@ class OverlayManager:
     def status(self) -> dict:
         self._check_alive()
         return {
-            "enabled": self._state == OverlayState.RUNNING,
+            "enabled": self._text_enabled,
             "state": self._state.value,
             "display": self.display,
             "socket": str(self.socket_path) if self._state == OverlayState.RUNNING else None,
             "renderer_pid": self._proc.pid if self._proc is not None and self._proc.poll() is None else None,
             "connected": self._sock is not None,
             "visible": self._visible,
+            "preview_enabled": self._preview_enabled,
+            "preview_region_count": len(self._preview_regions),
             "last_error": self._last_error,
         }
 
@@ -260,53 +267,113 @@ class OverlayManager:
 
     # -- lifecycle ---------------------------------------------------------
 
+    def _ensure_running(self) -> None:
+        """Spawn the renderer if needed. Must be called under ``self._lock``."""
+        if self._state == OverlayState.RUNNING and self._proc is not None and self._proc.poll() is None:
+            return
+        if self._state == OverlayState.STARTING:
+            return
+        self._state = OverlayState.STARTING
+        self._last_error = None
+        try:
+            if not gamescope_ready(self.display):
+                raise OverlayError("gamescope_not_ready")
+            python_path = resolve_python3()
+            self._check_python(python_path)
+            command = self._build_command(python_path)
+            self._spawn(command)
+            self._verify_child()
+            if not self._wait_for_socket(4.0):
+                raise OverlayError("renderer_socket_timeout")
+            self._connect()
+            self._handshake()
+            self._state = OverlayState.RUNNING
+            self._visible = False
+            self._last_text = ""
+            _log(
+                f"overlay renderer started (display={self.display}, "
+                f"pid={self._proc.pid if self._proc else None})"
+            )
+        except Exception as exc:
+            self._last_error = str(exc)
+            _log_error(f"overlay enable failed: {exc}")
+            self._shutdown_process()
+            self._state = OverlayState.FAILED
+
+    def _teardown_locked(self) -> None:
+        self._state = OverlayState.STOPPING
+        self._shutdown_process()
+        self._visible = False
+        self._last_text = ""
+        self._state = OverlayState.DISABLED
+
+    def _send_preview_locked(self) -> None:
+        self._send({"type": "set_region_preview", "regions": self._preview_regions})
+
     async def enable(self) -> dict:
         async with self._lock:
-            if self._state == OverlayState.RUNNING and self._proc is not None and self._proc.poll() is None:
-                return self.status()
-            if self._state == OverlayState.STARTING:
-                return self.status()
-            self._state = OverlayState.STARTING
-            self._last_error = None
-            try:
-                if not gamescope_ready(self.display):
-                    raise OverlayError("gamescope_not_ready")
-                python_path = resolve_python3()
-                self._check_python(python_path)
-                command = self._build_command(python_path)
-                self._spawn(command)
-                self._verify_child()
-                if not self._wait_for_socket(4.0):
-                    raise OverlayError("renderer_socket_timeout")
-                self._connect()
-                self._handshake()
+            self._ensure_running()
+            if self._state == OverlayState.RUNNING:
+                self._text_enabled = True
                 self._send({"type": "hide"})
-                self._state = OverlayState.RUNNING
-                _log(
-                    f"overlay enabled (display={self.display}, "
-                    f"pid={self._proc.pid if self._proc else None})"
-                )
-            except Exception as exc:
-                self._last_error = str(exc)
-                _log_error(f"overlay enable failed: {exc}")
-                self._shutdown_process()
-                self._state = OverlayState.FAILED
+                if self._preview_enabled:
+                    self._send_preview_locked()
             return self.status()
 
     async def disable(self) -> dict:
         async with self._lock:
-            if self._state == OverlayState.DISABLED:
-                return self.status()
-            self._state = OverlayState.STOPPING
-            self._shutdown_process()
+            self._text_enabled = False
+            if self._state == OverlayState.RUNNING:
+                self._send({"type": "hide"})
             self._visible = False
             self._last_text = ""
-            self._state = OverlayState.DISABLED
-            _log("overlay disabled")
+            if not self._preview_enabled and self._state != OverlayState.DISABLED:
+                self._teardown_locked()
+                _log("overlay disabled")
             return self.status()
 
     async def stop(self) -> None:
-        await self.disable()
+        async with self._lock:
+            self._text_enabled = False
+            self._preview_enabled = False
+            self._preview_regions = []
+            if self._state != OverlayState.DISABLED:
+                self._teardown_locked()
+                _log("overlay stopped")
+
+    # -- region preview (Phase 2L.8.2) -------------------------------------
+
+    async def set_region_preview_enabled(self, enabled: bool) -> dict:
+        async with self._lock:
+            self._preview_enabled = bool(enabled)
+            if self._preview_enabled:
+                self._ensure_running()
+                if self._state == OverlayState.RUNNING:
+                    self._send_preview_locked()
+            else:
+                if self._state == OverlayState.RUNNING:
+                    self._send({"type": "clear_region_preview"})
+                self._preview_regions = []
+                if not self._text_enabled and self._state != OverlayState.DISABLED:
+                    self._teardown_locked()
+                    _log("overlay disabled (preview off)")
+            return self.status()
+
+    async def set_region_preview(self, regions: list) -> dict:
+        async with self._lock:
+            self._preview_regions = protocol.sanitize_preview_regions(regions)
+            if self._preview_enabled and self._state == OverlayState.RUNNING:
+                self._send_preview_locked()
+            if self._preview_enabled:
+                _log(f"region preview set count={len(self._preview_regions)}")
+            return self.status()
+
+    async def clear_region_preview(self) -> dict:
+        async with self._lock:
+            self._preview_regions = []
+            if self._state == OverlayState.RUNNING:
+                self._send({"type": "clear_region_preview"})
+            return self.status()
 
     # -- command / spawn ---------------------------------------------------
 

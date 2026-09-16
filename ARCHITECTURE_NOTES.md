@@ -1647,6 +1647,41 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
 - capture isolation unchanged (`gamescope_control take_screenshot(base_plane_only)`);
   the preview is QAM UI only and cannot enter OCR input.
 
+### Phase 2L.8.2 — Explicit Renderer-Based Region Preview
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+- Device outcome: 2L.8 (body-mounted React preview) and 2L.8.1 (Steam-UI-tree
+  React preview) both rendered nothing over the game. Decision: stop attempting
+  implicit React/Steam-UI preview paths and reuse the proven Python/X11 external
+  overlay renderer for region rectangles.
+- Explicit control: **Show Region Preview** toggle in the QAM Recognition Regions
+  section. Default **OFF**, session/UI-local (not persisted, not in
+  `recognition_roi.json`). Plugin boot / QAM open / opening the editor never shows
+  boxes.
+- Renderer ownership is now reason-based: the shared renderer stays alive while
+  the persistent text overlay OR the region preview needs it, and stops only when
+  both are off. `OverlayManager.status()` exposes `enabled` (text) plus
+  `preview_enabled`/`preview_region_count`. `stop()` is the hard teardown used by
+  unload/uninstall.
+- Protocol: `set_region_preview {regions:[...]}` and `clear_region_preview`
+  (normalized `x/y/w/h`, `selected`/`primary`/`enabled`/`label`); sanitized in
+  `overlay/protocol.sanitize_preview_regions` (bounded `MAX_PREVIEW_REGIONS`,
+  drops invalid entries, never crashes). Renderer keeps independent text and
+  preview state; text update/hide never clears preview and vice versa.
+- Renderer draws outline-only rectangles with a small label (`Primary · Region N`
+  / `Region N (off)`), mapping `x*surface_width`, `y*surface_height` against the
+  actual renderer window (not QAM dimensions). Distinctions use line width,
+  opacity, and label (not color alone). A narrow `[renderer] preview count=...
+  surface=... rects=...` debug line is emitted only when debug/ preview is on.
+- Preview data comes from live frontend draft regions; slider/Add/Remove/Reorder/
+  selection update it with no Apply and no config write. QAM close clears the
+  preview and disables preview (renderer stops only if the text overlay is off).
+- Preview never starts/stops/restarts OCR; it is independent of the OCR worker
+  lifecycle. No text replay is triggered. Base-plane capture
+  (`take_screenshot(base_plane_only)`) is unchanged and excludes the overlay.
+- Region Name input remains removed; automatic `Region N` labels remain.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

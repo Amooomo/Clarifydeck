@@ -17,6 +17,7 @@ import {
   nextSelectionAfterRemove,
   primaryRegionId,
   regionLabel,
+  regionPreviewPayload,
   removeRegion,
   scopeAppId,
   scopeOptions,
@@ -26,11 +27,20 @@ import {
   validateRegions,
   type RegionConfigPayload,
   type RegionDraft,
+  type RegionPreviewRegion,
 } from "../regionEditor";
 
 const regionConfigGet = callable<[appId: string | null], RegionConfigPayload>("region_config_get");
 const regionConfigSet = callable<[regions: RegionDraft[], appId: string | null], RegionConfigPayload>("region_config_set");
 const regionConfigReset = callable<[appId: string | null], RegionConfigPayload>("region_config_reset");
+
+type OverlayControlResult = { ok?: boolean; error?: string; detail?: string; state?: string; renderer_pid?: number | null };
+
+// Explicit, UI-local (not persisted) region-preview control. Reuses the proven
+// Python/X11 renderer; independent from the persistent text overlay.
+const setRegionPreviewEnabled = callable<[enabled: boolean], OverlayControlResult>("set_region_preview_enabled");
+const setRegionPreviewRegions = callable<[regions: RegionPreviewRegion[]], OverlayControlResult>("set_region_preview");
+const clearRegionPreviewRegions = callable<[], OverlayControlResult>("clear_region_preview");
 
 // No app_id source exists in the QAM yet, so "This Game" is unavailable.
 const CURRENT_APP_ID: string | null = null;
@@ -42,7 +52,9 @@ export function RegionEditorSection() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [previewOn, setPreviewOn] = useState(false);
   const mounted = useRef(true);
+  const previewOnRef = useRef(false);
   const qamVisible = useQuickAccessVisible();
 
   const applyPayload = (result: RegionConfigPayload) => {
@@ -83,12 +95,52 @@ export function RegionEditorSection() {
   const selected = drafts.find((region) => region.region_id === selectedId) ?? null;
   const primaryId = primaryRegionId(drafts);
 
-  // Live on-screen preview follows draft state (no persistence until Apply).
+  // In-QAM draft preview store (also feeds the renderer preview below).
   useEffect(() => {
     setRegionPreview({ drafts, selectedId, primaryId });
   }, [drafts, selectedId, primaryId]);
 
-  useEffect(() => () => clearRegionPreview(), []);
+  // Explicit renderer preview lifecycle. Default OFF; QAM open never enables it.
+  useEffect(() => {
+    previewOnRef.current = previewOn;
+    void (async () => {
+      try {
+        await setRegionPreviewEnabled(previewOn);
+      } catch (err) {
+        if (mounted.current) {
+          setError(`Preview failed: ${String(err)}`);
+        }
+      }
+    })();
+  }, [previewOn]);
+
+  // Push live draft geometry to the renderer preview (no Apply required).
+  useEffect(() => {
+    if (!previewOn) {
+      return;
+    }
+    void (async () => {
+      try {
+        await setRegionPreviewRegions(regionPreviewPayload(drafts, selectedId));
+      } catch (err) {
+        if (mounted.current) {
+          setError(`Preview failed: ${String(err)}`);
+        }
+      }
+    })();
+  }, [previewOn, drafts, selectedId, primaryId]);
+
+  // QAM/editor close: clear the renderer preview and the in-QAM store.
+  useEffect(
+    () => () => {
+      if (previewOnRef.current) {
+        void setRegionPreviewEnabled(false);
+        void clearRegionPreviewRegions();
+      }
+      clearRegionPreview();
+    },
+    [],
+  );
 
   useEffect(() => {
     if (qamVisible) {
@@ -220,6 +272,14 @@ export function RegionEditorSection() {
             Move down
           </ButtonItem>
         </div>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ButtonItem layout="below" disabled={busy} onClick={() => setPreviewOn((value) => !value)}>
+          {previewOn ? "[x] Show Region Preview" : "[ ] Show Region Preview"}
+        </ButtonItem>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <div style={hintStyle}>Shows recognition boxes over the game while editing.</div>
       </PanelSectionRow>
       {selected ? (
         <>

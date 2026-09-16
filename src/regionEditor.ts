@@ -181,6 +181,40 @@ export function regionLabel(region: RegionDraft, index: number, primaryId: strin
 
 // -- Phase 2L.8 live preview --------------------------------------------------
 
+export type RegionPreviewRegion = {
+  region_id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  selected: boolean;
+  primary: boolean;
+  enabled: boolean;
+  label: string;
+};
+
+export function regionPreviewLabel(region: RegionDraft, index: number, primaryId: string | null): string {
+  const base = `Region ${index + 1}`;
+  const prefix = region.region_id === primaryId ? "Primary · " : "";
+  const suffix = region.enabled ? "" : " (off)";
+  return `${prefix}${base}${suffix}`;
+}
+
+export function regionPreviewPayload(regions: RegionDraft[], selectedId: string | null): RegionPreviewRegion[] {
+  const primaryId = primaryRegionId(regions);
+  return regions.map((region, index) => ({
+    region_id: region.region_id,
+    x: region.x,
+    y: region.y,
+    w: region.w,
+    h: region.h,
+    selected: region.region_id === selectedId,
+    primary: region.region_id === primaryId,
+    enabled: region.enabled,
+    label: regionPreviewLabel(region, index, primaryId),
+  }));
+}
+
 export type ScreenRect = { left: number; top: number; width: number; height: number };
 
 export function regionScreenRect(region: RegionDraft, viewportWidth: number, viewportHeight: number): ScreenRect {

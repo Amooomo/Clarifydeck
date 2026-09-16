@@ -476,6 +476,57 @@ check("name: reorder renumbers by order, ids unchanged", () => {
   assert.equal(r.regionLabel(moved[0], 0, r.primaryRegionId(moved)), "Region 1 [Primary]");
 });
 
+// -- Phase 2L.8.2 explicit renderer-based region preview ----------------------
+
+check("f1: preview default OFF and explicit control", () => {
+  assert.ok(regionComponentSrc.includes("const [previewOn, setPreviewOn] = useState(false)"));
+  assert.ok(regionComponentSrc.includes("setPreviewOn"));
+});
+check("f2: preview ON drives backend preview RPCs", () => {
+  assert.ok(regionComponentSrc.includes("setRegionPreviewEnabled(previewOn)"));
+  assert.ok(regionComponentSrc.includes("setRegionPreviewRegions("));
+});
+check("f3: live geometry reflected in preview payload", () => {
+  const payload = r.regionPreviewPayload([R({ region_id: "a", x: 0.5 })], "a");
+  assert.equal(payload[0].x, 0.5);
+  assert.equal(payload[0].selected, true);
+});
+check("f4: add/remove update payload", () => {
+  assert.equal(r.regionPreviewPayload([R({ region_id: "a" })], "a").length, 1);
+  assert.equal(r.regionPreviewPayload(r.removeRegion([R({ region_id: "a" })], "a"), null).length, 0);
+});
+check("f5: reorder updates Primary and labels", () => {
+  const moved = r.moveRegion([R({ region_id: "a" }), R({ region_id: "b" })], "b", -1);
+  const payload = r.regionPreviewPayload(moved, null);
+  assert.equal(payload[0].primary, true);
+  assert.equal(payload[0].label, "Primary · Region 1");
+  assert.equal(payload[1].label, "Region 2");
+});
+check("f6: selected region reflected by region_id", () => {
+  const payload = r.regionPreviewPayload([R({ region_id: "a" }), R({ region_id: "b" })], "b");
+  assert.equal(payload[0].selected, false);
+  assert.equal(payload[1].selected, true);
+});
+check("f7: preview OFF clears renderer preview", () => {
+  assert.ok(regionComponentSrc.includes("setRegionPreviewEnabled(previewOn)"));
+  assert.ok(regionComponentSrc.includes("clearRegionPreviewRegions()"));
+});
+check("f8: QAM close clears preview", () => {
+  assert.ok(regionComponentSrc.includes("setRegionPreviewEnabled(false)"));
+  assert.ok(regionComponentSrc.includes("clearRegionPreview()"));
+});
+check("f9: preview does not touch OCR lifecycle", () => {
+  for (const needle of ["start_ocr_worker", "stop_ocr_worker", "capture_producer"]) {
+    assert.equal(regionComponentSrc.includes(needle), false, needle);
+  }
+});
+check("f10: preview changes never write region config", () =>
+  assert.equal(countOccurrences(regionComponentSrc, "regionConfigSet("), 1),
+);
+check("f: disabled preview label", () =>
+  assert.equal(r.regionPreviewLabel(R({ region_id: "a", enabled: false }), 1, null), "Region 2 (off)"),
+);
+
 if (process.exitCode) {
   console.error(`\nfrontend OCR diagnostic harness FAILED (${passed} passed)`);
 } else {
