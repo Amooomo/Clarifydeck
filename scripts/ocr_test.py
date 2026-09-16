@@ -255,15 +255,24 @@ class OCRDiagnostic:
                 )
             else:
                 print("[ocr-stable] emit=clear", flush=True)
-        if self.machine_stream is not None:
-            for event in events:
-                self._stable_event_seq += 1
-                try:
-                    envelope = envelope_from_event(self._stable_event_seq, event)
-                    self.machine_stream.write(encode_envelope(envelope) + "\n")
-                    self.machine_stream.flush()
-                except Exception as exc:  # must never break the OCR loop
-                    print(f"[ocr-stable] emit_error detail={exc}", flush=True)
+        self._emit_stable_events(events)
+
+    def _emit_stable_events(self, events) -> None:
+        """Write stabilizer events to the machine JSONL stream (transport).
+
+        Shared by real OCR observations and skipped-frame ticks: a clear emitted
+        by ``tick`` after a real no-text observation must reach transport too.
+        """
+        if self.machine_stream is None:
+            return
+        for event in events:
+            self._stable_event_seq += 1
+            try:
+                envelope = envelope_from_event(self._stable_event_seq, event)
+                self.machine_stream.write(encode_envelope(envelope) + "\n")
+                self.machine_stream.flush()
+            except Exception as exc:  # must never break the OCR loop
+                print(f"[ocr-stable] emit_error detail={exc}", flush=True)
 
     def _correlate(self, result, timings: dict) -> None:
         """Bounded recent table: sequence / ocr_wall_ms / det_ms / capture timing."""
@@ -461,8 +470,15 @@ class OCRDiagnostic:
                 )
             if decision.action == "skip":
                 # Skipped OCR is NOT an empty OCR result; advance time only.
+                # A clear can still legitimately fire here when an earlier real
+                # no-text observation set the stale clock; forward it to transport.
                 if self.stabilizer is not None:
-                    self.stabilizer.tick(time.monotonic())
+                    events = self.stabilizer.tick(time.monotonic())
+                    if events:
+                        for event in events:
+                            if event.kind == "clear":
+                                print("[ocr-stable] emit=clear", flush=True)
+                        self._emit_stable_events(events)
                 return
             self.roi_width = roi_frame.width
             self.roi_height = roi_frame.height

@@ -1209,6 +1209,46 @@ accepted OCR event
 - Final closure requires Steam Deck device validation (worker thread → main loop
   → OverlayManager → AF_UNIX IPC → Gamescope transparent window).
 
+### Phase 2K.2.1 — Stable clear emission fix
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+Device finding:
+- live text delivery passed
+- when the ROI became empty for > stale timeout, the QAM retained prior stable
+  text
+- therefore no authoritative `StableTextEvent(kind="clear")` reached backend
+  transport
+
+Root cause:
+- `OCRDiagnostic._process_and_record` handled a change-gated `skip` by calling
+  `stabilizer.tick(...)` and **discarding its return value**. `tick` legitimately
+  emits one clear once the stale timeout completes after a real no-text
+  observation, but that event was never written to the machine JSONL stream, so
+  the backend/QAM never cleared. (With the change gate OFF, clears already flowed
+  via `observe`; the loss was specific to the skipped-frame `tick` path.)
+
+Fix:
+- Extracted `OCRDiagnostic._emit_stable_events(events)` (writes stabilizer events
+  to the transport stream) and call it from both `_stabilize` (real OCR
+  observations) and the change-gated `skip` path after `stabilizer.tick(...)`.
+
+Preserved:
+- skipped frames do not fake OCR (a clear from `tick` still requires an earlier
+  real no-text observation to have set the stale clock)
+- OCR/capture/detector errors do not synthesize clear
+- change detection is not correctness authority
+- clear remains exactly-once after stale; clear fields unchanged
+  (`kind="clear"`, `text=""`, `confidence=None`, `source_seq=None`)
+- new stable text after clear emits normally (overlay can re-show)
+- overlay delivery unchanged
+
+Device retest required:
+StableTextEvent(clear)
+-> QAM clear
+-> overlay hide
+-> later new stable text restores overlay
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so
