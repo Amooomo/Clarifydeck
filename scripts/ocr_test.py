@@ -55,7 +55,8 @@ from ocr import (  # noqa: E402
     probe_report_lines,
     probe_runtime,
 )
-from ocr.transport import encode_envelope, envelope_from_event  # noqa: E402
+from ocr.multi_region import MultiRegionOCRCoordinator  # noqa: E402
+from ocr.transport import encode_envelope, encode_region_stable_text_event, envelope_from_event  # noqa: E402
 
 # Bounded cap for opt-in OCR evidence diagnostics (never unbounded logs).
 MAX_EVIDENCE_LINES = 20
@@ -204,13 +205,26 @@ class OCRDiagnostic:
     MAX_CONSECUTIVE_ERRORS = 3
     RECENT_LIMIT = 12
 
-    def __init__(self, args, runtime: OCRRuntime, resolver=None, stabilizer=None, gate=None, machine_stream=None) -> None:
+    def __init__(
+        self,
+        args,
+        runtime: OCRRuntime,
+        resolver=None,
+        stabilizer=None,
+        gate=None,
+        machine_stream=None,
+        multi_region_regions=None,
+    ) -> None:
         self.args = args
         self.runtime = runtime
         self.resolver = resolver
         self.stabilizer = stabilizer
         self.gate = gate
         self.machine_stream = machine_stream
+        self._multi_region_enabled = bool(getattr(args, "multi_region", False))
+        self._multi_region_regions = tuple(multi_region_regions) if multi_region_regions is not None else None
+        self._multi_region_primary_id: Optional[str] = None
+        self._multi_region_coordinator: Optional[MultiRegionOCRCoordinator] = None
         self._stable_event_seq = 0
         self._last_ocr_trigger: Optional[str] = None
         self._debug_resolver = None
@@ -333,6 +347,15 @@ class OCRDiagnostic:
         except Exception as exc:
             print(f"[ocr-schedule] emit_error detail={exc}", file=sys.stderr, flush=True)
 
+    def _write_machine_line(self, line: str) -> None:
+        if self.machine_stream is None:
+            return
+        try:
+            self.machine_stream.write(line + "\n")
+            self.machine_stream.flush()
+        except Exception as exc:  # must never break the OCR loop
+            print(f"[ocr-stable] emit_error detail={exc}", flush=True)
+
     def _emit_stable_events(self, events) -> None:
         """Write stabilizer events to the machine JSONL stream (transport).
 
@@ -343,12 +366,40 @@ class OCRDiagnostic:
             return
         for event in events:
             self._stable_event_seq += 1
-            try:
-                envelope = envelope_from_event(self._stable_event_seq, event)
-                self.machine_stream.write(encode_envelope(envelope) + "\n")
-                self.machine_stream.flush()
-            except Exception as exc:  # must never break the OCR loop
-                print(f"[ocr-stable] emit_error detail={exc}", flush=True)
+            self._write_machine_line(encode_envelope(envelope_from_event(self._stable_event_seq, event)))
+
+    # -- Phase 2L.4 opt-in multi-region execution --------------------------
+
+    def _resolve_effective_regions(self):
+        """Authoritative 2L.1 region resolution (no second resolver here)."""
+        from capture import recognition_regions, recognition_roi
+
+        store = recognition_regions.RegionConfigStore(recognition_roi.get_store().path)
+        resolver = recognition_regions.RegionResolver(store, legacy_resolver=recognition_roi.get_resolver())
+        return resolver.resolve_effective_regions(getattr(self.args, "app_id", None)).regions
+
+    def _setup_multi_region(self) -> bool:
+        if self._multi_region_regions is None:
+            self._multi_region_regions = tuple(self._resolve_effective_regions())
+        primary = next((region for region in self._multi_region_regions if region.enabled), None)
+        self._multi_region_primary_id = primary.region_id if primary is not None else None
+        self._multi_region_coordinator = MultiRegionOCRCoordinator(self.runtime)
+        return True
+
+    def _process_multi_region(self, frame, wait_ms: float) -> None:
+        """One decode -> many region crops -> v2 events (+ primary v1 projection)."""
+        region_events = self._multi_region_coordinator.process_frame(frame, self._multi_region_regions)
+        self.frames_ocr += 1
+        for region_event in region_events:
+            self._stable_event_seq += 1
+            self._write_machine_line(
+                encode_region_stable_text_event(self._stable_event_seq, region_event)
+            )
+            if region_event.region_id == self._multi_region_primary_id:
+                self._stable_event_seq += 1
+                self._write_machine_line(
+                    encode_envelope(envelope_from_event(self._stable_event_seq, region_event.event))
+                )
 
     def _correlate(self, result, timings: dict) -> None:
         """Bounded recent table: sequence / ocr_wall_ms / det_ms / capture timing."""
@@ -408,6 +459,12 @@ class OCRDiagnostic:
                 print(f'[ocr] #{index} conf={conf} text="{line.text}"', flush=True)
 
     async def run_live(self) -> int:
+        if self._multi_region_enabled and self.gate is not None:
+            print(
+                "[ocr] config_error error=multi_region_change_gate_unsupported",
+                flush=True,
+            )
+            return 2
         self._queue = LatestFrameQueue()
         if self.args.live:
             capture = gamescope_capture.GamescopeCapture(logger=lambda m: print(m, file=sys.stderr))
@@ -432,6 +489,8 @@ class OCRDiagnostic:
         if self.gate is not None:
             self.gate.reset()
         self._stable_event_seq = 0
+        if self._multi_region_enabled:
+            self._setup_multi_region()
         if getattr(self.args, "debug_switch_roi", None) is not None:
             base_roi = recognition_roi.get_resolver().resolve(self.args.app_id).roi
             self._debug_resolver = _StaticResolver(base_roi)
@@ -508,6 +567,10 @@ class OCRDiagnostic:
         return self._debug_resolver if self._debug_resolver is not None else self.resolver
 
     async def _process_and_record(self, frame, wait_ms: float) -> None:
+        if self._multi_region_enabled:
+            # One decode -> many region crops; OCR runtime runs in a worker thread.
+            await asyncio.to_thread(self._process_multi_region, frame, wait_ms)
+            return
         if self.gate is not None and self._debug_reset_after is not None and not self._scheduler_reset:
             if time.monotonic() - self._wall_start >= self._debug_reset_after:
                 before = self.gate.stats().ocr_trigger_first
@@ -995,6 +1058,11 @@ def main(argv=None) -> int:
         "--diagnostic-ocr-evidence",
         action="store_true",
         help="emit bounded per-OCR-attempt evidence records to stderr (diagnostics only)",
+    )
+    parser.add_argument(
+        "--multi-region",
+        action="store_true",
+        help="opt-in multi-region OCR execution (v2 region-tagged output)",
     )
     parser.add_argument("--change-gate", action="store_true", help="skip OCR when the ROI is unchanged")
     parser.add_argument("--force-ocr-interval-sec", type=float, default=3.0)

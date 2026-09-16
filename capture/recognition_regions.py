@@ -29,6 +29,7 @@ from .recognition_roi import (
     CONFIG_VERSION as LEGACY_CONFIG_VERSION,
     MAX_APP_ID_LENGTH,
     MIN_ROI_SIZE,
+    SOURCE_DEFAULT,
     ROIConfigStore,
     ActiveROIResolver,
     parse_roi,
@@ -390,14 +391,13 @@ class RegionResolver:
 
     def _legacy_region(self, app_id: Optional[str]) -> RecognitionRegion:
         if self._legacy is not None:
-            return region_from_roi(self._legacy.resolve(app_id).roi, region_id=LEGACY_REGION_ID)
+            resolved = self._legacy.resolve(app_id)
+            region_id = BUILTIN_REGION_ID if resolved.source == SOURCE_DEFAULT else LEGACY_REGION_ID
+            return region_from_roi(resolved.roi, region_id=region_id)
         roi = self._store.get_legacy_roi(app_id)
         if roi is None:
-            roi = DEFAULT_ROI
-            region_id = BUILTIN_REGION_ID
-        else:
-            region_id = LEGACY_REGION_ID
-        return region_from_roi(roi, region_id=region_id)
+            return region_from_roi(DEFAULT_ROI, region_id=BUILTIN_REGION_ID)
+        return region_from_roi(roi, region_id=LEGACY_REGION_ID)
 
     def primary_region(self, app_id: Optional[str] = None) -> Optional[RecognitionRegion]:
         """Transitional single-ROI compatibility: first enabled effective region."""

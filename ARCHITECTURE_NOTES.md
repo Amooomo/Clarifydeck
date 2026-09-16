@@ -1454,6 +1454,43 @@ source. `ocr.transport.envelope_from_event` additionally canonicalizes clear at
 the transport boundary (defense in depth), so no producer can emit a second clear
 shape. Stale timing, consensus, and exactly-once behavior are unchanged.
 
+## Phase 2L.4 — Multi-Region OCR Worker Integration
+
+Status: LOCAL PASS / DEVICE WORKER RETEST PENDING
+
+- explicit `--multi-region` opt-in on `scripts/ocr_worker.py` (and the standalone
+  `scripts/ocr_test.py` CLI); default **OFF**. The backend launcher does not pass
+  it in this phase, so normal QAM "Start OCR" stays legacy single-region/v1.
+- effective region resolution uses the authoritative 2L.1 resolver
+  (`RegionResolver` + legacy `ActiveROIResolver`): v2 per-game > v2 global >
+  legacy single-ROI fallback > built-in default. No second resolver in the worker.
+- one capture frame -> one decode -> many region crops through
+  `MultiRegionOCRCoordinator`; one `OCRRuntime` reused sequentially. The v1
+  compatibility projection adds zero OCR calls (no duplicate primary OCR).
+- every region stable event emits a v2 line
+  (`encode_region_stable_text_event`); the primary region (first enabled) also
+  emits a semantically equivalent v1 line for the current QAM/single-block
+  overlay. Wire order is v2 then v1, with one worker-global `event_seq` across all
+  lines. Non-primary regions emit v2 only.
+- clear projection remains canonical (`text=""`, `confidence=None`,
+  `source_seq=None`).
+- multi-region + `--change-gate` is explicitly rejected before the OCR loop
+  (`multi_region_change_gate_unsupported`); legacy single-region change-gate
+  behavior is unchanged. Per-region change-gated scheduling is deferred.
+- region configuration is resolved at worker session start (no live reload); this
+  matches existing worker behavior.
+- `--diagnostic-ocr-evidence` remains functional in legacy mode; per-region
+  evidence records (with `region_id`) are deferred.
+- renderer/overlay/QAM/frontend/transport semantics unchanged. Region OCR
+  exceptions propagate to the existing `_consume` error policy (not converted to
+  no-text).
+- narrow correction: `RegionResolver` now assigns `builtin-default` (not
+  `legacy-primary`) when the legacy resolver reports the built-in default source;
+  no persistence schema change.
+
+The primary-region v1 compatibility projection is **temporary** and should be
+removed only after QAM/overlay consume explicit per-region state (multi-block).
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

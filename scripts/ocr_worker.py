@@ -84,6 +84,11 @@ def _parse_args(argv=None) -> argparse.Namespace:
         action="store_true",
         help="emit bounded per-OCR-attempt evidence records to stderr (diagnostics only)",
     )
+    parser.add_argument(
+        "--multi-region",
+        action="store_true",
+        help="opt-in multi-region OCR execution (v2 region-tagged output; not production-default)",
+    )
     parser.add_argument("--min-line-confidence", type=float, default=0.70)
     parser.add_argument("--consensus-required", type=int, default=2)
     parser.add_argument("--history-size", type=int, default=3)
@@ -122,11 +127,22 @@ def _diagnostic_args(args: argparse.Namespace) -> argparse.Namespace:
         stable_output=True,
         emit_stable_jsonl=True,
         diagnostic_ocr_evidence=args.diagnostic_ocr_evidence,
+        multi_region=args.multi_region,
     )
 
 
 def main(argv=None) -> int:
     args = _parse_args(argv)
+
+    # Multi-region change-gated scheduling is not implemented yet; reject the
+    # combination explicitly rather than silently applying one global gate.
+    if args.multi_region and args.change_gate:
+        print(
+            "[ocr-worker] config_error detail=multi_region_change_gate_unsupported",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
 
     # Arm orphan safety EARLY, before any OCR/native initialization.
     try:
