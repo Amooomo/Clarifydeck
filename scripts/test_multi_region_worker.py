@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = Path(__file__).resolve().parent
@@ -28,14 +29,16 @@ for candidate in (str(ROOT), str(SCRIPTS)):
 
 import ocr_test  # noqa: E402
 import ocr.multi_region as mr  # noqa: E402
+import ocr.transport as t  # noqa: E402
 import scripts.ocr_worker as worker  # noqa: E402
 from backend.ocr_transport import OCRTransportReceiver  # noqa: E402
 from backend.overlay_delivery import OverlayDeliveryObserver  # noqa: E402
 from backend.overlay_text import OverlayTextCoordinator  # noqa: E402
 from capture import recognition_roi, recognition_regions as rr  # noqa: E402
 from capture.recognition_regions import RecognitionRegion  # noqa: E402
+from capture.scheduler import OCRChangeGate  # noqa: E402
 from ocr.result import OCRFrameResult, OCRLine  # noqa: E402
-from ocr.stabilizer import OCRStabilizer  # noqa: E402
+from ocr.stabilizer import OCRStabilizer, StableTextEvent  # noqa: E402
 from ocr.transport import decode_envelope  # noqa: E402
 
 
@@ -53,6 +56,42 @@ class Clock:
 
     def __call__(self):
         return self.value
+
+
+class FakeDetector:
+    def __init__(self, changes):
+        self._changes = list(changes)
+        self._index = 0
+
+    def classify_rgba(self, **kwargs):
+        changed = self._changes[min(self._index, len(self._changes) - 1)] if self._changes else False
+        self._index += 1
+        return SimpleNamespace(changed=changed, score=0.0, reason="x", age_ms=0.0)
+
+    def reset_state(self):
+        self._index = 0
+
+
+class BrokenDetector:
+    def classify_rgba(self, **kwargs):
+        raise RuntimeError("detector boom")
+
+    def reset_state(self):
+        pass
+
+
+def gate(detector, clock, force=3.0):
+    return OCRChangeGate(detector, force_interval_sec=force, clock=clock)
+
+
+def _gated_coordinator(runtime, gates, clock):
+    queue = list(gates)
+    return mr.MultiRegionOCRCoordinator(
+        runtime,
+        stabilizer_factory=lambda: OCRStabilizer(consensus_required=1, history_size=1, stale_timeout_sec=2.0),
+        gate_factory=lambda: queue.pop(0),
+        clock=clock,
+    )
 
 
 class FakeRuntime:
@@ -133,16 +172,73 @@ class ModeSelectionTest(unittest.TestCase):
             finally:
                 recognition_roi._STORE, recognition_roi._RESOLVER = saved
 
-    def test_w3_multi_region_change_gate_rejected(self) -> None:
-        self.assertEqual(worker.main(["--multi-region", "--change-gate"]), 2)
+    def test_w2_multi_region_change_gate_accepted(self) -> None:
+        args = worker._parse_args(["--multi-region", "--change-gate"])
+        self.assertTrue(args.multi_region and args.change_gate)
         diagnostic = ocr_test.OCRDiagnostic(
-            _args(multi_region=True), runtime=None, gate=object(), multi_region_regions=(region("A"),)
+            _args(multi_region=True), runtime=FakeRuntime(), gate=object(), multi_region_regions=(region("A"),)
         )
-        self.assertEqual(asyncio.run(diagnostic.run_live()), 2)
+        diagnostic._setup_multi_region()
+        self.assertIsNotNone(diagnostic._multi_region_coordinator)
+        self.assertIsNotNone(diagnostic._multi_region_coordinator._gate_factory)
+
+    def test_w1_multi_region_gate_off_has_no_gates(self) -> None:
+        diagnostic = _diag(io.StringIO(), [region("A")], FakeRuntime())
+        self.assertIsNone(diagnostic._multi_region_coordinator._gate_factory)
 
     def test_w4_legacy_change_gate_unchanged(self) -> None:
         diagnostic = ocr_test.OCRDiagnostic(_args(multi_region=False), runtime=None, gate=object())
-        self.assertFalse(diagnostic._multi_region_enabled and diagnostic.gate is not None)
+        self.assertFalse(diagnostic._multi_region_enabled)
+
+    def test_w3_one_unchanged_one_changing(self) -> None:
+        machine = io.StringIO()
+        clock = Clock(0.0)
+        runtime = FakeRuntime([[line("A0")], [line("B0")], [line("B1")]])
+        diagnostic = _diag(machine, [region("A"), region("B", x=0.5)], runtime, clock=clock)
+        diagnostic._multi_region_coordinator = _gated_coordinator(
+            runtime,
+            [gate(FakeDetector([True, False]), clock, 1000), gate(FakeDetector([True, True]), clock, 1000)],
+            clock,
+        )
+        diagnostic._process_multi_region(_frame(), 0.0)  # warm-up: both
+        diagnostic._process_multi_region(_frame(), 0.0)  # A skip, B OCR
+        wire = _wire(machine)
+        # A has a v1 projection; B never does.
+        self.assertEqual([(w["v"], w.get("region_id")) for w in wire], [(2, "A"), (1, None), (2, "B"), (2, "B")])
+
+    def test_w4_forced_refresh_causes_region_ocr(self) -> None:
+        machine = io.StringIO()
+        clock = Clock(0.0)
+        runtime = FakeRuntime([[line("A0")], [line("A1")]])
+        diagnostic = _diag(machine, [region("A")], runtime, clock=clock)
+        diagnostic._multi_region_coordinator = _gated_coordinator(
+            runtime, [gate(FakeDetector([True, False]), clock, 3.0)], clock
+        )
+        diagnostic._process_multi_region(_frame(), 0.0)  # warm-up
+        before = len(runtime.calls)
+        clock.value = 3.5
+        diagnostic._process_multi_region(_frame(), 0.0)  # forced refresh
+        self.assertEqual(len(runtime.calls) - before, 1)
+
+    def test_w5_detector_error_fail_open_per_region(self) -> None:
+        machine = io.StringIO()
+        clock = Clock(0.0)
+        runtime = FakeRuntime([[line("A0")], [line("B0")], [line("A1")]])
+        diagnostic = _diag(machine, [region("A"), region("B", x=0.5)], runtime, clock=clock)
+        diagnostic._multi_region_coordinator = _gated_coordinator(
+            runtime,
+            [gate(BrokenDetector(), clock, 1000), gate(FakeDetector([True, False]), clock, 1000)],
+            clock,
+        )
+        diagnostic._process_multi_region(_frame(), 0.0)  # warm-up
+        before = len(runtime.calls)
+        diagnostic._process_multi_region(_frame(), 0.0)  # A fail-open, B skip
+        self.assertEqual(len(runtime.calls) - before, 1)
+
+    def test_w6_legacy_single_region_gate_unchanged(self) -> None:
+        diagnostic = ocr_test.OCRDiagnostic(_args(multi_region=False), runtime=None, gate=object())
+        self.assertFalse(diagnostic._multi_region_enabled)
+        self.assertIsNone(diagnostic._multi_region_coordinator)
 
 
 class ConfigResolutionTest(unittest.TestCase):
@@ -399,6 +495,30 @@ class BackendCompatibilityTest(unittest.TestCase):
         self.assertEqual(status["transport_messages_rejected"], 0)
         self.assertEqual(status["transport_out_of_order"], 0)
 
+    def test_b6_mixed_gated_stream(self) -> None:
+        # Primary A (with v1 projection) + secondary B (v2 only), gated.
+        clock = Clock(0.0)
+        machine = io.StringIO()
+        runtime = FakeRuntime([[line("A0")], [line("B0")], [line("B1")]])
+        diagnostic = _diag(machine, [region("A"), region("B", x=0.5)], runtime, clock=clock)
+        diagnostic._multi_region_coordinator = _gated_coordinator(
+            runtime,
+            [gate(FakeDetector([True, False]), clock, 1000), gate(FakeDetector([True, True]), clock, 1000)],
+            clock,
+        )
+        diagnostic._process_multi_region(_frame(), 0.0)
+        diagnostic._process_multi_region(_frame(), 0.0)
+        lines = [line_json for line_json in machine.getvalue().splitlines() if line_json.strip()]
+        receiver = OCRTransportReceiver(session_id="s1")
+        for line_json in lines:
+            self.assertTrue(receiver.handle_line(line_json))
+        status = receiver.status()
+        self.assertEqual(status["transport_messages_rejected"], 0)
+        self.assertEqual(status["transport_out_of_order"], 0)
+        self.assertEqual(receiver.latest_stable_text_by_region("A")["text"], "A0")
+        self.assertEqual(receiver.latest_stable_text_by_region("B")["text"], "B1")
+        self.assertEqual(receiver.state().text, "A0")  # legacy only from primary v1 projection
+
 
 class OverlayCompatibilityTest(unittest.TestCase):
     def _receiver(self):
@@ -449,6 +569,35 @@ class OverlayCompatibilityTest(unittest.TestCase):
             receiver.handle_line(line_json)
         hides = [action for action in delivery.submitted if action.kind == "hide"]
         self.assertEqual(len(hides), 1)
+
+    def test_o5_primary_tick_clear_projection_is_one_hide(self) -> None:
+        clock = Clock(0.0)
+        machine = io.StringIO()
+        runtime = FakeRuntime([[line("Hello")], []])
+        diagnostic = _diag(machine, [region("A")], runtime, clock=clock)
+        diagnostic._multi_region_coordinator = _gated_coordinator(
+            runtime, [gate(FakeDetector([True, True, False, False]), clock, 1000)], clock
+        )
+        diagnostic._process_multi_region(_frame(), 0.0)  # text
+        clock.value = 0.5
+        diagnostic._process_multi_region(_frame(), 0.0)  # real no-text
+        clock.value = 1.0
+        diagnostic._process_multi_region(_frame(), 0.0)  # skip tick
+        clock.value = 3.0
+        diagnostic._process_multi_region(_frame(), 0.0)  # skip tick -> clear
+        lines = [line_json for line_json in machine.getvalue().splitlines() if line_json.strip()]
+        receiver, delivery = self._receiver()
+        for line_json in lines:
+            receiver.handle_line(line_json)
+        hides = [action for action in delivery.submitted if action.kind == "hide"]
+        self.assertEqual(len(hides), 1)
+
+    def test_o6_secondary_tick_clear_no_overlay_action(self) -> None:
+        clear = StableTextEvent(kind="clear", text="", confidence=None, source_seq=None, timestamp_monotonic=1.0)
+        line = t.encode_region_stable_text_event(1, mr.RegionStableTextEvent(region_id="B", event=clear))
+        receiver, delivery = self._receiver()
+        self.assertTrue(receiver.handle_line(line))
+        self.assertEqual(delivery.submitted, [])
 
 
 if __name__ == "__main__":

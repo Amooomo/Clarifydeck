@@ -383,7 +383,13 @@ class OCRDiagnostic:
             self._multi_region_regions = tuple(self._resolve_effective_regions())
         primary = next((region for region in self._multi_region_regions if region.enabled), None)
         self._multi_region_primary_id = primary.region_id if primary is not None else None
-        self._multi_region_coordinator = MultiRegionOCRCoordinator(self.runtime)
+        # When the change gate is requested, give every region its own gate (never
+        # share the single-region gate instance across regions).
+        gate_factory = None
+        if self.gate is not None:
+            force = validate_force_interval(getattr(self.args, "force_ocr_interval_sec", 3.0))
+            gate_factory = lambda: OCRChangeGate(force_interval_sec=force)
+        self._multi_region_coordinator = MultiRegionOCRCoordinator(self.runtime, gate_factory=gate_factory)
         return True
 
     def _process_multi_region(self, frame, wait_ms: float) -> None:
@@ -459,12 +465,6 @@ class OCRDiagnostic:
                 print(f'[ocr] #{index} conf={conf} text="{line.text}"', flush=True)
 
     async def run_live(self) -> int:
-        if self._multi_region_enabled and self.gate is not None:
-            print(
-                "[ocr] config_error error=multi_region_change_gate_unsupported",
-                flush=True,
-            )
-            return 2
         self._queue = LatestFrameQueue()
         if self.args.live:
             capture = gamescope_capture.GamescopeCapture(logger=lambda m: print(m, file=sys.stderr))

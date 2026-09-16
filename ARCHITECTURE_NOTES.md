@@ -1491,6 +1491,37 @@ Status: LOCAL PASS / DEVICE WORKER RETEST PENDING
 The primary-region v1 compatibility projection is **temporary** and should be
 removed only after QAM/overlay consume explicit per-region state (multi-block).
 
+## Phase 2L.5 — Per-Region Change-Gated Scheduling
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+- `ocr/multi_region.py` gives each enabled stable `region_id` its own
+  `OCRChangeGate` via an optional `gate_factory` (never a shared gate, never keyed
+  by index). `RegionRecognitionState` now holds `stabilizer + gate + geometry`.
+- one frame decode is retained; each enabled region is cropped once and the same
+  crop is used for both the change check and (when scheduled) OCR. No recapture,
+  no per-region decode.
+- independent decisions: unchanged region -> skip (no OCR); changed region -> OCR.
+  One region's skip never suppresses another; forced refresh is per region
+  (independent `force_interval_sec` timer); detector failure fail-opens only the
+  affected region.
+- skip is never converted to no-text: a skipped region calls its own
+  `stabilizer.tick()` and any tick-produced clear is forwarded as a
+  `RegionStableTextEvent` (the 2K.2.1 bug is not repeated).
+- lifecycle: geometry change resets only that region's stabilizer + gate;
+  remove/disable discard transient state (no synthetic clear); re-enable starts
+  fresh; reorder preserves stabilizer/gate/forced-refresh state.
+- `--multi-region --change-gate` is now supported (the 2L.4 fail-fast is removed).
+  The worker builds a per-region gate factory from `--force-ocr-interval-sec`
+  (default 3 s); the single-region gate instance is never shared across regions.
+  Legacy single-region change-gate behavior is unchanged.
+- v2/v1 compatibility projection is unchanged: primary region emits v2 then v1;
+  secondary regions emit v2 only; one worker-global `event_seq`. A primary
+  tick-generated clear emits v2 clear then v1 clear; a secondary tick clear emits
+  v2 only and never touches legacy QAM/overlay.
+- backend launcher still does not enable multi-region by default; QAM/frontend/
+  renderer unchanged; no new dependencies; diagnostics remain stderr-only.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

@@ -134,16 +134,6 @@ def _diagnostic_args(args: argparse.Namespace) -> argparse.Namespace:
 def main(argv=None) -> int:
     args = _parse_args(argv)
 
-    # Multi-region change-gated scheduling is not implemented yet; reject the
-    # combination explicitly rather than silently applying one global gate.
-    if args.multi_region and args.change_gate:
-        print(
-            "[ocr-worker] config_error detail=multi_region_change_gate_unsupported",
-            file=sys.stderr,
-            flush=True,
-        )
-        return 2
-
     # Arm orphan safety EARLY, before any OCR/native initialization.
     try:
         arm_result = parent_death.setup_parent_death(args.parent_pid, signal.SIGINT)

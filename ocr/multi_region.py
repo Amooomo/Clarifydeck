@@ -42,6 +42,10 @@ class MultiRegionStats:
     events_emitted: int = 0
     states_discarded: int = 0
     states_reset: int = 0
+    change_checks: int = 0
+    regions_skipped: int = 0
+    regions_forced: int = 0
+    detector_errors: int = 0
 
 
 @dataclass
@@ -49,6 +53,7 @@ class RegionRecognitionState:
     region: RecognitionRegion
     stabilizer: OCRStabilizer
     geometry: tuple[float, float, float, float]
+    gate: Any = None
 
 
 def region_pixel_rect(region: RecognitionRegion, frame_width: int, frame_height: int) -> PixelROI:
@@ -68,10 +73,12 @@ class MultiRegionOCRCoordinator:
         runtime: Any,
         *,
         stabilizer_factory: Optional[Callable[[], OCRStabilizer]] = None,
+        gate_factory: Optional[Callable[[], Any]] = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._runtime = runtime
         self._stabilizer_factory = stabilizer_factory or OCRStabilizer
+        self._gate_factory = gate_factory
         self._clock = clock
         self._states: dict[str, RegionRecognitionState] = {}
         self._stats = MultiRegionStats()
@@ -90,7 +97,14 @@ class MultiRegionOCRCoordinator:
     def process_frame(self, frame: Any, regions: Iterable[RecognitionRegion]) -> list[RegionStableTextEvent]:
         """Decode once, then OCR each enabled region from the same decoded frame."""
         decoded = decode_png_ex(frame.encoded_bytes)
-        return self.process_decoded(decoded.rgba, decoded.width, decoded.height, frame.sequence, regions)
+        return self.process_decoded(
+            decoded.rgba,
+            decoded.width,
+            decoded.height,
+            frame.sequence,
+            regions,
+            captured_monotonic=getattr(frame, "captured_monotonic", None),
+        )
 
     def process_decoded(
         self,
@@ -99,6 +113,7 @@ class MultiRegionOCRCoordinator:
         frame_height: int,
         sequence: Optional[int],
         regions: Iterable[RecognitionRegion],
+        captured_monotonic: Optional[float] = None,
     ) -> list[RegionStableTextEvent]:
         enabled = [region for region in regions if region.enabled]
         self._discard_missing(enabled)
@@ -111,6 +126,30 @@ class MultiRegionOCRCoordinator:
             pixel = region_pixel_rect(region, frame_width, frame_height)
             crop_width, crop_height, crop = crop_rgba(rgba, frame_width, frame_height, pixel)
             self._stats.crops += 1
+
+            if state.gate is not None:
+                decision = state.gate.decide(
+                    crop,
+                    crop_width,
+                    crop_height,
+                    sequence,
+                    self._clock() if captured_monotonic is None else captured_monotonic,
+                    roi_key=pixel.as_tuple(),
+                )
+                self._stats.change_checks += 1
+                if decision.action == "skip":
+                    # Skip is NOT no-text evidence; advance the region's own clock
+                    # and forward any tick-produced clear (never discard it).
+                    self._stats.regions_skipped += 1
+                    for event in state.stabilizer.tick(self._clock()):
+                        events.append(RegionStableTextEvent(region_id=region.region_id, event=event))
+                        self._stats.events_emitted += 1
+                    continue
+                if decision.reason == "forced_refresh":
+                    self._stats.regions_forced += 1
+                elif decision.reason == "detector_error":
+                    self._stats.detector_errors += 1
+
             result = self._runtime.recognize_rgba(crop, crop_width, crop_height, sequence=sequence)
             self._stats.ocr_calls += 1
             for event in state.stabilizer.observe(result.lines, result.sequence, self._clock()):
@@ -134,17 +173,25 @@ class MultiRegionOCRCoordinator:
         state = self._states.get(region.region_id)
         if state is None:
             state = RegionRecognitionState(
-                region=region, stabilizer=self._stabilizer_factory(), geometry=geometry
+                region=region,
+                stabilizer=self._stabilizer_factory(),
+                geometry=geometry,
+                gate=self._gate_factory() if self._gate_factory is not None else None,
             )
             self._states[region.region_id] = state
             return state
         if state.geometry != geometry:
+            # Geometry change: fresh stabilizer AND fresh change-detector state;
+            # other regions are untouched.
             state = RegionRecognitionState(
-                region=region, stabilizer=self._stabilizer_factory(), geometry=geometry
+                region=region,
+                stabilizer=self._stabilizer_factory(),
+                geometry=geometry,
+                gate=self._gate_factory() if self._gate_factory is not None else None,
             )
             self._states[region.region_id] = state
             self._stats.states_reset += 1
             return state
-        # Same identity/geometry: preserve stabilizer state; refresh metadata only.
+        # Same identity/geometry: preserve stabilizer + gate state; refresh metadata.
         state.region = region
         return state
