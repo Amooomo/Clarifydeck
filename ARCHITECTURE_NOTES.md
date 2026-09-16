@@ -1162,6 +1162,53 @@ game base-plane capture
 
 Translation remains out of scope.
 
+## Phase 2K.2 — Thread-Safe Stable Text → Persistent Overlay Delivery
+
+Status: LOCAL PASS / DEVICE PENDING
+
+Production flow:
+accepted OCR event
+-> OverlayTextCoordinator
+-> OverlayTextAction
+-> MainLoopOverlayDelivery
+-> thread-safe scheduling to plugin asyncio loop
+-> existing OverlayManager.update/hide
+-> existing renderer
+
+- `backend/overlay_delivery.py` (pure stdlib) adds `MainLoopOverlayDelivery`
+  (bounded capacity=1 newest-wins pending, serial drain, non-blocking
+  `submit`) and `OverlayDeliveryObserver` (coordinator → delivery). It never
+  enables/starts the renderer and never constructs an `OverlayManager`; it uses a
+  non-creating peek accessor.
+- Production wiring (`main.py`): `_main` (leader) captures the already-running
+  loop via `asyncio.get_running_loop()` and installs the observer on the SAME
+  authoritative shared `OCRTransportReceiver` used by `OCRWorkerManager` and the
+  QAM diagnostics. `_transport_receiver()` now passes `observer=self._overlay_observer`
+  at creation; `init_overlay_delivery` attaches via `receiver.set_observer(...)`
+  if the receiver already exists. One receiver is preserved (no duplicate-receiver
+  regression).
+- Frozen:
+  - OCR stdout thread never awaits/touches the renderer; handoff is only
+    `loop.call_soon_threadsafe(...)` onto the single existing main loop
+  - no second event loop, no `asyncio.run`/`new_event_loop`/`run_until_complete`,
+    no blocking `.result()`, no background overlay thread
+  - non-blocking submit; pending capacity=1 newest-wins; serial renderer delivery
+  - renderer must already be explicitly enabled; an OCR event never auto-starts
+    the renderer, and overlay enable never auto-starts OCR
+  - disabled overlay drops actions (no indefinite queueing); no old-text replay
+    when overlay is later enabled
+  - text is passed exactly; `clear` calls `hide`
+  - session switch invalidates not-yet-delivered old-session actions; an action
+    already executing is allowed to finish (serial order preserved)
+  - delivery/loop-closed failures are isolated (`delivery_errors`,
+    `last_delivery_error`) and cannot invalidate OCR transport acceptance
+  - no styling/reflow/font settings added; existing renderer presentation defaults
+- Lifecycle: `_unload`/`_uninstall` order is
+  `stop() → shutdown_capture() → stop_ocr_worker() → close_overlay_delivery()
+  → stop_overlay()`.
+- Final closure requires Steam Deck device validation (worker thread → main loop
+  → OverlayManager → AF_UNIX IPC → Gamescope transparent window).
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

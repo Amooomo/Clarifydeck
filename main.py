@@ -64,6 +64,11 @@ try:
 except Exception:  # pragma: no cover - optional at import time
     ocr_worker_module = None  # type: ignore[assignment]
 
+try:
+    from backend import overlay_delivery
+except Exception:  # pragma: no cover - optional at import time
+    overlay_delivery = None  # type: ignore[assignment]
+
 
 def _plugin_root() -> Path:
     return Path(os.path.dirname(os.path.abspath(__file__)))
@@ -362,6 +367,9 @@ class ClarifyDeckEngine:
         self._roi_resolver: Optional[Any] = None
         self._ocr_transport: Optional[Any] = None
         self._ocr_worker: Optional[Any] = None
+        self._overlay_coordinator: Optional[Any] = None
+        self._overlay_delivery: Optional[Any] = None
+        self._overlay_observer: Optional[Any] = None
 
     def configure_runtime(self, runtime_dir: str | Path) -> None:
         self._runtime_dir = Path(runtime_dir)
@@ -788,8 +796,45 @@ class ClarifyDeckEngine:
         if ocr_transport is None:
             return None
         if self._ocr_transport is None:
-            self._ocr_transport = ocr_transport.OCRTransportReceiver()
+            self._ocr_transport = ocr_transport.OCRTransportReceiver(observer=self._overlay_observer)
         return self._ocr_transport
+
+    # -- Phase 2K.2 main-loop overlay delivery -----------------------------
+
+    def _peek_overlay_manager(self) -> Optional[Any]:
+        """Non-creating peek at the existing overlay manager (never constructs one)."""
+        return self._overlay
+
+    def init_overlay_delivery(self, loop: Any) -> None:
+        """Install the production overlay observer on the shared OCR receiver.
+
+        Captures the already-running plugin/main asyncio loop. Does not start OCR
+        or the renderer; delivery only forwards actions once both are explicitly
+        active. Safe to call once per engine (idempotent).
+        """
+        if overlay_delivery is None or self._role != "leader":
+            return
+        if self._overlay_delivery is not None:
+            return
+        self._overlay_coordinator = overlay_delivery.OverlayTextCoordinator()
+        self._overlay_delivery = overlay_delivery.MainLoopOverlayDelivery(
+            loop=loop,
+            get_overlay_manager=self._peek_overlay_manager,
+        )
+        self._overlay_observer = overlay_delivery.OverlayDeliveryObserver(
+            coordinator=self._overlay_coordinator,
+            delivery=self._overlay_delivery,
+        )
+        if self._ocr_transport is not None:
+            self._ocr_transport.set_observer(self._overlay_observer)
+
+    def close_overlay_delivery(self) -> None:
+        """Stop accepting/scheduling overlay actions (idempotent, non-blocking)."""
+        if self._overlay_delivery is not None:
+            self._overlay_delivery.close()
+        self._overlay_observer = None
+        if self._ocr_transport is not None:
+            self._ocr_transport.set_observer(None)
 
     def ocr_transport_status(self) -> dict[str, Any]:
         receiver = self._transport_receiver()
@@ -1403,6 +1448,9 @@ class Plugin:
             # Create the manager object only. The renderer is NOT spawned until the
             # user explicitly enables the persistent overlay.
             engine.init_overlay(debug=debug)
+            # Obtain the already-running plugin/main loop for thread-safe overlay
+            # delivery. Does not start OCR or the renderer.
+            engine.init_overlay_delivery(asyncio.get_running_loop())
             decky.logger.info(
                 "ClarifyDeck overlay boot state=DISABLED; renderer spawn prohibited "
                 "until explicit RPC enable"
@@ -1423,6 +1471,7 @@ class Plugin:
         await get_engine().stop()
         await get_engine().shutdown_capture()
         get_engine().stop_ocr_worker()
+        get_engine().close_overlay_delivery()
         await get_engine().stop_overlay()
         decky.logger.info("ClarifyDeck backend unloaded")
 
@@ -1430,6 +1479,7 @@ class Plugin:
         await get_engine().stop()
         await get_engine().shutdown_capture()
         get_engine().stop_ocr_worker()
+        get_engine().close_overlay_delivery()
         await get_engine().stop_overlay()
         decky.logger.info("ClarifyDeck backend uninstalled")
 

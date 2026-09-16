@@ -150,6 +150,13 @@ class OCRTransportReceiver:
 
     # -- observer seam -----------------------------------------------------
 
+    def set_observer(self, observer: Optional[OCRTransportObserver]) -> None:
+        """Attach/replace the optional post-accept observer (narrow seam).
+
+        Does not touch state, stats, or session; used only for production wiring.
+        """
+        self._observer = observer
+
     def _notify_begin_session(self, session_id: str) -> None:
         observer = self._observer
         if observer is None:
