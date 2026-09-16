@@ -42,6 +42,19 @@ from .bundle import (
     wheel_tags,
 )
 from .result import OCRFrameResult, OCRLine
+from .stabilizer import (
+    DEFAULT_CONSENSUS_REQUIRED,
+    DEFAULT_HISTORY_SIZE,
+    DEFAULT_MIN_LINE_CONFIDENCE,
+    DEFAULT_STALE_TIMEOUT_SEC,
+    OCRCandidate,
+    OCRStabilizer,
+    StableTextEvent,
+    StabilizerConfigError,
+    StabilizerStats,
+    build_candidate_text,
+    normalize_line,
+)
 from .runtime import (
     ALLOWED_DET_LIMIT_TYPES,
     DEFAULT_DET_LIMIT_SIDE_LEN,
@@ -63,6 +76,17 @@ from .runtime import (
 __all__ = [
     "OCRFrameResult",
     "OCRLine",
+    "OCRCandidate",
+    "OCRStabilizer",
+    "StableTextEvent",
+    "StabilizerConfigError",
+    "StabilizerStats",
+    "build_candidate_text",
+    "normalize_line",
+    "DEFAULT_MIN_LINE_CONFIDENCE",
+    "DEFAULT_CONSENSUS_REQUIRED",
+    "DEFAULT_HISTORY_SIZE",
+    "DEFAULT_STALE_TIMEOUT_SEC",
     "ModelManifest",
     "OCRConfig",
     "OCRError",

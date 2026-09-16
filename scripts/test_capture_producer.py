@@ -337,6 +337,155 @@ class ShutdownTest(unittest.TestCase):
         asyncio.run(run())
 
 
+class _StopDuringCapture:
+    """Capture that requests stop mid-flight and then fails (shutdown race)."""
+
+    def __init__(self, fail_on_call: int = 2) -> None:
+        self.producer = None
+        self.calls = 0
+        self.fail_on_call = fail_on_call
+
+    def capture_frame(self, mode: str = "base_plane_only", timeout: float = 5.0, debug_copy=None) -> CaptureFrame:
+        self.calls += 1
+        if self.calls == self.fail_on_call:
+            self.producer._stop_requested = True
+            raise CaptureError("capture_failed_during_stop")
+        return CaptureFrame.from_png(_png(), sequence=self.calls, source_backend="mock", source_mode=mode)
+
+
+class _StopAfterCapture:
+    """Capture that succeeds but requests stop before publish (shutdown discard)."""
+
+    def __init__(self, stop_on_call: int = 2) -> None:
+        self.producer = None
+        self.calls = 0
+        self.stop_on_call = stop_on_call
+
+    def capture_frame(self, mode: str = "base_plane_only", timeout: float = 5.0, debug_copy=None) -> CaptureFrame:
+        self.calls += 1
+        frame = CaptureFrame.from_png(_png(), sequence=self.calls, source_backend="mock", source_mode=mode)
+        if self.calls == self.stop_on_call:
+            self.producer._stop_requested = True
+        return frame
+
+
+async def _cancelling_runner(fn, *args):
+    raise asyncio.CancelledError()
+
+
+class ShutdownAccountingTest(unittest.TestCase):
+    """Phase 2H.1: capture_errors counts genuine failures only."""
+
+    def test_clean_run_no_capture_errors(self) -> None:
+        async def run() -> None:
+            ft = FakeTime()
+            queue = LatestFrameQueue()
+            producer = make_producer(ft, FakeCapture(ft), queue, target_fps=1.0)
+            await producer.start()
+            await _advance(ft, 2500)
+            await producer.stop()
+            self.assertEqual(queue.stats().capture_errors, 0)
+            self.assertEqual(producer.status()["frames_failed"], 0)
+            self.assertIsNone(producer.status()["last_error_category"])
+
+        asyncio.run(run())
+
+    def test_failure_during_stop_not_counted_as_capture_error(self) -> None:
+        async def run() -> None:
+            ft = FakeTime()
+            queue = LatestFrameQueue()
+            capture = _StopDuringCapture()
+            producer = make_producer(ft, capture, queue, target_fps=1.0)
+            capture.producer = producer
+            await producer.start()
+            await _advance(ft, 2000)
+            await producer.stop()
+            status = producer.status()
+            self.assertEqual(queue.stats().capture_errors, 0)
+            self.assertEqual(status["frames_failed"], 0)
+            self.assertGreaterEqual(status["capture_cancellations"], 1)
+            self.assertEqual(status["last_error_category"], "stop_during_capture")
+
+        asyncio.run(run())
+
+    def test_successful_capture_after_stop_is_shutdown_discard(self) -> None:
+        async def run() -> None:
+            ft = FakeTime()
+            queue = LatestFrameQueue()
+            capture = _StopAfterCapture()
+            producer = make_producer(ft, capture, queue, target_fps=1.0)
+            capture.producer = producer
+            await producer.start()
+            await _advance(ft, 2000)
+            await producer.stop()
+            status = producer.status()
+            self.assertEqual(queue.stats().capture_errors, 0)
+            self.assertEqual(status["shutdown_discarded_frames"], 1)
+
+        asyncio.run(run())
+
+    def test_expected_cancellation_not_counted_as_capture_error(self) -> None:
+        async def run() -> None:
+            ft = FakeTime()
+            queue = LatestFrameQueue()
+            producer = CaptureProducer(
+                FakeCapture(ft),
+                queue,
+                clock=ft.clock,
+                sleep=ft.sleep,
+                runner=_cancelling_runner,
+            )
+            await producer.start()
+            await _advance(ft, 500)
+            await producer.stop()
+            status = producer.status()
+            self.assertEqual(queue.stats().capture_errors, 0)
+            self.assertGreaterEqual(status["capture_cancellations"], 1)
+            self.assertEqual(status["frames_failed"], 0)
+
+        asyncio.run(run())
+
+    def test_real_capture_failure_still_counted(self) -> None:
+        async def run() -> None:
+            ft = FakeTime()
+            queue = LatestFrameQueue()
+            producer = make_producer(ft, FakeCapture(ft, fail_every=2), queue, target_fps=1.0)
+            await producer.start()
+            await _advance(ft, 2500)
+            status = producer.status()
+            self.assertGreaterEqual(queue.stats().capture_errors, 1)
+            self.assertGreaterEqual(status["frames_failed"], 1)
+            self.assertGreaterEqual(status["consecutive_failures"], 1)
+            self.assertEqual(status["last_error_category"], "capture_operation_error")
+            await producer.stop()
+
+        asyncio.run(run())
+
+    def test_failure_threshold_unchanged(self) -> None:
+        async def run() -> None:
+            ft = FakeTime()
+            queue = LatestFrameQueue()
+            producer = make_producer(ft, FakeCapture(ft, fail_all=True), queue, max_consecutive_failures=3)
+            await producer.start()
+            await _advance(ft, 3000)
+            self.assertEqual(producer.status()["state"], "FAILED")
+            self.assertEqual(producer.status()["frames_failed"], 3)
+            self.assertEqual(queue.stats().capture_errors, 3)
+            await producer.stop()
+
+        asyncio.run(run())
+
+    def test_status_exposes_new_keys(self) -> None:
+        async def run() -> None:
+            ft = FakeTime()
+            producer = make_producer(ft, FakeCapture(ft), LatestFrameQueue())
+            status = producer.status()
+            for key in ("capture_cancellations", "shutdown_discarded_frames", "last_error_category"):
+                self.assertIn(key, status)
+
+        asyncio.run(run())
+
+
 class NoAutoStartTest(unittest.TestCase):
     def test_main_does_not_start_producer(self) -> None:
         source = (ROOT / "main.py").read_text(encoding="utf-8")

@@ -54,6 +54,17 @@ except Exception:  # pragma: no cover - optional at import time
             self.message = message
 
 
+try:
+    from backend import ocr_transport
+except Exception:  # pragma: no cover - optional at import time
+    ocr_transport = None  # type: ignore[assignment]
+
+try:
+    from backend import ocr_worker as ocr_worker_module
+except Exception:  # pragma: no cover - optional at import time
+    ocr_worker_module = None  # type: ignore[assignment]
+
+
 def _plugin_root() -> Path:
     return Path(os.path.dirname(os.path.abspath(__file__)))
 
@@ -349,6 +360,8 @@ class ClarifyDeckEngine:
         self._role = "standby"
         self._roi_config: Optional[Any] = None
         self._roi_resolver: Optional[Any] = None
+        self._ocr_transport: Optional[Any] = None
+        self._ocr_worker: Optional[Any] = None
 
     def configure_runtime(self, runtime_dir: str | Path) -> None:
         self._runtime_dir = Path(runtime_dir)
@@ -750,6 +763,10 @@ class ClarifyDeckEngine:
                 "frames_failed": 0,
                 "last_sequence": None,
                 "last_capture_ms": None,
+                "last_error": None,
+                "last_error_category": None,
+                "capture_cancellations": 0,
+                "shutdown_discarded_frames": 0,
                 "queue": None,
             }
         return self._producer.status()
@@ -764,6 +781,73 @@ class ClarifyDeckEngine:
         if self._frame_queue is not None:
             self._frame_queue.clear()
             self._frame_queue = None
+
+    # -- Phase 2I.1 OCR stable-text transport ------------------------------
+
+    def _transport_receiver(self) -> Optional[Any]:
+        if ocr_transport is None:
+            return None
+        if self._ocr_transport is None:
+            self._ocr_transport = ocr_transport.OCRTransportReceiver()
+        return self._ocr_transport
+
+    def ocr_transport_status(self) -> dict[str, Any]:
+        receiver = self._transport_receiver()
+        if receiver is None:
+            return {"ok": False, "error": "ocr_transport_unavailable"}
+        return {"ok": True, **receiver.status()}
+
+    def latest_stable_text(self) -> dict[str, Any]:
+        receiver = self._transport_receiver()
+        if receiver is None:
+            return {"ok": False, "error": "ocr_transport_unavailable"}
+        return {"ok": True, **receiver.state_dict()}
+
+    # -- Phase 2I.2 OCR worker lifecycle -----------------------------------
+
+    def _ocr_worker_manager(self) -> Optional[Any]:
+        if ocr_worker_module is None:
+            return None
+        if self._ocr_worker is None:
+            # One authoritative receiver per engine, shared with the manager so
+            # worker status and latest-stable-text observe the same session/state.
+            receiver = self._transport_receiver()
+            if receiver is None:
+                return None
+            self._ocr_worker = ocr_worker_module.OCRWorkerManager(
+                plugin_root=_plugin_root(),
+                settings_root=self.roi_config_path().parent,
+                transport_receiver=receiver,
+                logger=decky.logger.info,
+            )
+        return self._ocr_worker
+
+    def start_ocr_worker(self, change_gate: bool = False, fps: float = 1.0) -> dict[str, Any]:
+        if self._role != "leader":
+            return {"ok": False, "error": "not_leader"}
+        manager = self._ocr_worker_manager()
+        if manager is None:
+            return {"ok": False, "error": "ocr_worker_unavailable"}
+        producer = self._producer
+        if producer is not None and producer.status().get("state") == "RUNNING":
+            return {
+                "ok": False,
+                "error": "capture_conflict",
+                "detail": "capture producer is RUNNING; stop it before starting the OCR worker",
+            }
+        return manager.start(fps=fps, change_gate=change_gate)
+
+    def stop_ocr_worker(self) -> dict[str, Any]:
+        manager = self._ocr_worker_manager()
+        if manager is None:
+            return {"ok": False, "error": "ocr_worker_unavailable"}
+        return manager.stop()
+
+    def ocr_worker_status(self) -> dict[str, Any]:
+        manager = self._ocr_worker_manager()
+        if manager is None:
+            return {"ok": False, "error": "ocr_worker_unavailable", "state": "STOPPED"}
+        return manager.status()
 
     # -- Phase 2E.2 recognition ROI config ---------------------------------
 
@@ -1287,6 +1371,21 @@ class Plugin:
     ) -> dict[str, Any]:
         return get_engine().roi_config_preview(roi, app_id)
 
+    async def get_ocr_transport_status(self) -> dict[str, Any]:
+        return get_engine().ocr_transport_status()
+
+    async def get_latest_stable_text(self) -> dict[str, Any]:
+        return get_engine().latest_stable_text()
+
+    async def start_ocr_worker(self, change_gate: bool = False) -> dict[str, Any]:
+        return get_engine().start_ocr_worker(change_gate)
+
+    async def stop_ocr_worker(self) -> dict[str, Any]:
+        return get_engine().stop_ocr_worker()
+
+    async def get_ocr_worker_status(self) -> dict[str, Any]:
+        return get_engine().ocr_worker_status()
+
     async def clear_error(self) -> None:
         await get_engine().clear_error()
 
@@ -1323,12 +1422,14 @@ class Plugin:
     async def _unload(self) -> None:
         await get_engine().stop()
         await get_engine().shutdown_capture()
+        get_engine().stop_ocr_worker()
         await get_engine().stop_overlay()
         decky.logger.info("ClarifyDeck backend unloaded")
 
     async def _uninstall(self) -> None:
         await get_engine().stop()
         await get_engine().shutdown_capture()
+        get_engine().stop_ocr_worker()
         await get_engine().stop_overlay()
         decky.logger.info("ClarifyDeck backend uninstalled")
 

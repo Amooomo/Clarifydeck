@@ -816,7 +816,7 @@ class DebugRoiCopyTest(unittest.TestCase):
     def test_debug_encoding_excluded_from_ocr_timing(self) -> None:
         import inspect
 
-        source = inspect.getsource(ocr_test.OCRDiagnostic._consume)
+        source = inspect.getsource(ocr_test.OCRDiagnostic._process_and_record)
         self.assertLess(source.index("self._stats.add("), source.index("self._save_debug_roi("))
 
     def test_invalid_debug_path_fails_safely(self) -> None:
@@ -1105,15 +1105,17 @@ class ShutdownTest(unittest.TestCase):
         ocr_test.asyncio.run = boom
         try:
             out = io.StringIO()
-            with contextlib.redirect_stdout(out):
+            err = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 code = ocr_test.main(
                     ["--mock", "--duration-sec", "1", "--plugin-root", str(empty_root)]
                 )
         finally:
             ocr_test.asyncio.run = original
         self.assertEqual(code, 130)
-        self.assertIn("[ocr] interrupted", out.getvalue())
+        self.assertIn("[ocr] interrupted", err.getvalue())
         self.assertNotIn("Traceback", out.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
 
     def test_queue_capacity_unchanged(self) -> None:
         import contextlib

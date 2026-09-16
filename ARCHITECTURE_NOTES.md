@@ -472,6 +472,530 @@ instead of the real gamescope process; use `pgrep -x gamescope` or the
   prints `[ocr] interrupted`, returns **130**. Normal completion returns the
   PASS/FAIL code; a manually interrupted run does not print PASS.
 
+## Phase 2G OCR output stabilization
+
+- `ocr/stabilizer.py` (dependency-free: no numpy/cv2/onnxruntime/rapidocr/capture)
+  turns raw OCR lines into a stable text stream: confidence filter → conservative
+  normalization → temporal consensus → duplicate suppression → stale timeout.
+- `OCRStabilizer(min_line_confidence=0.70, consensus_required=2, history_size=3,
+  stale_timeout_sec=2.0)`. A candidate is the ordered join (`"\n"`) of normalized
+  non-empty eligible lines; missing confidence is **rejected** (never treated as
+  1.0); `confidence >= threshold` is eligible. Normalization is NFC + outer strip
+  + inner space/tab collapse + CRLF→LF; no translation/punctuation edits.
+- Consensus = same normalized candidate in `consensus_required` of the most
+  recent `history_size` eligible frames (exact match; bounded `deque`). Emits a
+  `text` event only when the stable text differs from `last_emitted_text`;
+  otherwise counts `duplicate_suppressed`. Empty frames do not clear
+  immediately; a monotonic `stale_timeout_sec` with no eligible candidate emits
+  exactly one `clear`, then no spam. `reset()` clears all state.
+- `scripts/ocr_test.py` integration is **opt-in** (`--stable-output`, default
+  off): `--min-line-confidence`, `--consensus-required`, `--history-size`,
+  `--stale-timeout-sec`; invalid config → `config_error` exit 2. Prints
+  `[ocr-stable] candidate=`, `consensus=N/M`, `emit=text|clear`, and
+  `[ocr-stable] stats={...}` at shutdown. Raw `[ocr]` diagnostics are unchanged
+  and the raw path is untouched when the flag is absent.
+
+## Phase 2H change-gated OCR scheduling
+
+- `capture/scheduler.py` adds `OCRChangeGate`, a thin adapter over the existing
+  `ROIChangeDetector` (grid 48x12, threshold 0.006). Decision per consumed frame:
+  first frame -> OCR; detector changed -> OCR; `force_interval_sec` elapsed ->
+  OCR; otherwise skip. Detector exceptions fail **open** to OCR and increment
+  `change_detector_errors`.
+- Scheduling position: decode -> crop active ROI -> change check -> optional OCR
+  -> stabilizer. Only the change check runs on skipped frames (no image re-encode).
+- `ocr.stabilizer.tick(timestamp)` advances time for skipped frames without
+  adding history, counting as empty, resetting consensus, or incrementing
+  `raw_frames`. If the last real observation contained text the stable text is
+  preserved (keep-alive); if the last observation was empty the stale timeout can
+  complete and emit one clear. An unchanged subtitle therefore never stale-clears.
+- `OCRChangeGate.reset()` (session start, explicit reset) and geometry-change
+  detection both reset the detector baseline so the next frame always OCRs.
+- CLI (opt-in): `--change-gate` (default OFF), `--force-ocr-interval-sec`
+  (default 3.0, must be > 0). Prints `[ocr-scheduler] seq=… changed=… action=…
+  reason=…` under `--debug` and `[ocr-scheduler] stats={…}` (incl.
+  `ocr_skip_ratio`, `avg_change_check_ms`) at shutdown.
+
+## Phase 2H.1 capture shutdown accounting
+
+- H2 showed `capture_errors=1` at shutdown with no visible error. The only
+  increment site is `CaptureProducer._run`'s `except Exception` →
+  `queue.note_capture_error()`; the producer had a no-op logger in the
+  diagnostic, so the reason was hidden.
+- Attribution + fix in `capture/producer.py`:
+  - `asyncio.CancelledError` → `capture_cancellations++` (never a capture error).
+  - `Exception` while `_stop_requested` is set (capture in flight when stop was
+    requested) → `capture_cancellations++`, `last_error_category="stop_during_capture"`,
+    logged, **not** counted as `capture_errors`/`consecutive_failures`, no FAILED.
+  - `Exception` while not stopping → unchanged genuine failure: `frames_failed++`,
+    `consecutive_failures++`, `queue.note_capture_error()`,
+    `last_error_category="capture_operation_error"`, failure threshold still 5.
+  - Successful capture after stop is discarded (not published) and counted as
+    `shutdown_discarded_frames`.
+- New bounded counters in `status()`: `last_error_category`, `capture_cancellations`,
+  `shutdown_discarded_frames` (plus `main.py`'s default status dict).
+- `scripts/ocr_test.py` now passes a printing logger to `CaptureProducer` and
+  prints `[capture-producer] state=… frames_failed=… capture_cancellations=…
+  shutdown_discarded_frames=… last_error_category=… last_error=…` in the summary,
+  so genuine failures are always visible. `capture_errors` now means genuine
+  capture failures only.
+
+## Phase 2H.2 post-change confirmation OCR
+
+- H3 gap: a changed frame produced a new candidate at `consensus=1/2`, but the
+  next frames were visually unchanged and got skipped, so the second consensus
+  vote waited for the 3 s forced refresh — adding ~3 s of text latency.
+- `OCRChangeGate` gains bounded confirmation scheduling:
+  - `note_ocr_result(needs_confirmation)` is the narrow downstream feedback
+    (no OCR objects cross the boundary; unexpected values fail open to arming).
+  - Priority: `first_frame` > `change` > `confirmation` > `forced_refresh` >
+    `unchanged`. A new change supersedes pending confirmation
+    (`confirmation_superseded++`).
+  - Bounded to `max_confirmation_attempts=1` per change event (no OCR-until-stable
+    loop); `confirmation` clears on execute, supersede, reset, and ROI geometry
+    change. Forced refresh remains the detector false-negative safety net.
+- `OCRStabilizer.needs_confirmation` (public property) is True only when the last
+  real observation has a candidate that is not yet stable **and** differs from the
+  emitted text. Stable emits, duplicate already-stable text, and empty
+  observations report False, so harmless visual noise does not trigger
+  confirmation loops.
+- Confirmation OCR is a real observation: it increments stabilizer `raw_frames`
+  and can satisfy consensus normally. Skipped frames still do not.
+- New counters: `ocr_trigger_confirmation`, `confirmation_armed`,
+  `confirmation_superseded`. Gate OFF is unchanged (no scheduler output, no
+  confirmation).
+
+## Phase 2H.3 bounded confirmation retry
+
+- C2 showed a short-lived auto-advance subtitle where two real observations
+  differed slightly (an extra punctuation/ellipsis line), so exact-string
+  consensus stayed at 1/2 and the budget (`max_confirmation_attempts=1`) was
+  exhausted before a matching vote arrived.
+- Budget raised to `DEFAULT_MAX_CONFIRMATION_ATTEMPTS = 2`, giving at most
+  `change OCR + confirmation #1 + confirmation #2` (3 real observations) per
+  detected change — still bounded, no OCR-until-stable loop.
+- `OCRChangeGate` tracks `_confirmation_remaining` / `_confirmation_attempts_done`
+  / `_confirmation_exhausted_counted`. `note_ocr_result(needs)` arms on the first
+  vote (`confirmation_armed`), schedules a retry after a prior confirmation still
+  needs consensus (`confirmation_retried`), and marks `confirmation_exhausted`
+  once when the budget ends while consensus is still needed. A new change
+  re-arms a fresh budget and supersedes the old one (`confirmation_superseded`).
+- `SchedulerDecision.confirmation_remaining` is exposed and printed for
+  confirmation decisions: `[ocr-scheduler] seq=N changed=False action=ocr
+  reason=confirmation remaining=1`.
+- Priority unchanged: `first_frame > change > confirmation > forced_refresh >
+  unchanged`; forced refresh remains the long-tail safety net.
+
+## Phase 2H H4 forced-refresh recovery hook
+
+- H4 verifies the false-negative safety net: a real subtitle change that the
+  detector misses must still be recovered by the forced refresh.
+- Diagnostic-only `--debug-force-unchanged` (default OFF) makes `OCRChangeGate`
+  report the scheduler-facing `changed` as False while the detector still runs
+  (threshold/resolution untouched). `first_frame` still OCRs, `reason=change` is
+  suppressed, and `forced_refresh` fires normally; a forced-refresh OCR may still
+  arm bounded confirmation when the stabilizer needs another vote.
+- Detector exceptions still fail open to OCR even under the override.
+- `OCRChangeGate(force_unchanged=...)`; `SchedulerDecision.changed` reflects the
+  effective (forced) value so `[ocr-scheduler] changed=False` is accurate.
+
+## Phase 2H H5 change-detector fail-open
+
+- H5 verifies the fail-open contract: a change-detector exception must never
+  cause a skipped OCR. `OCRChangeGate.decide` catches detector exceptions at the
+  call boundary, increments `change_detector_errors`, and emits a distinct
+  `reason=detector_error` (priority `first_frame > detector_error > change >
+  confirmation > forced_refresh > unchanged`). The OCR loop, queue, and
+  `CaptureProducer` are unaffected; detector failures are not counted as
+  `capture_errors` / `frames_failed` / `ocr_errors`.
+- Diagnostic-only `--debug-force-change-detector-error` (default OFF) raises at
+  the exact detector boundary so the fail-open path can be exercised on device
+  without touching the frozen 48x12 / 0.006 detector. `first_frame` still OCRs.
+- New counter `ocr_trigger_detector_error`; `change_detector_errors` unchanged.
+
+## Phase 2H H6 ROI geometry reset boundary
+
+- H6 makes the scheduler's ROI boundary explicit. `OCRChangeGate.decide` now
+  accepts `roi_key` (the full authoritative pixel rect `(x, y, w, h)`); a change
+  in that key — not just the size — resets the detector baseline, clears pending
+  confirmation, clears the confirmation budget, and treats the next frame as
+  `reason=first_frame` (immediate OCR, no comparison against the old ROI). Same
+  geometry does not spuriously reset.
+- `SchedulerDecision.roi_geometry_changed` / `.roi_geometry` expose the boundary;
+  `--debug` prints `[ocr-scheduler] roi_geometry_changed new=(x,y,w,h) reset=1`.
+- Diagnostic-only `--debug-switch-roi-after-sec N` + `--debug-switch-roi x,y,w,h`
+  (default OFF) switch the diagnostic process's ROI via a `_StaticResolver`,
+  routing through the same production reset path and never mutating persisted
+  user config. It prints `[ocr-scheduler] debug_roi_switch roi=(...)`.
+- Detector threshold/grid, force interval, confirmation budget, OCR settings, and
+  the stabilizer are untouched.
+
+## Phase 2H H7 explicit session reset boundary
+
+- H7 verifies the explicit reset contract using the existing production
+  `OCRChangeGate.reset()` (no second reset implementation). `reset()` clears the
+  detector baseline, pending confirmation, confirmation budget, ROI geometry,
+  per-session first-frame state, and forced-refresh timing, so the next valid
+  frame OCRs as a fresh `reason=first_frame`. Cumulative counters **persist**
+  across reset so the boundary is observable (`ocr_trigger_first` increases).
+- Diagnostic-only `--debug-reset-scheduler-after-sec N` (default OFF) calls the
+  production `reset()` once after N seconds, printing
+  `[ocr-scheduler] debug_scheduler_reset reset=1 ocr_trigger_first_before=N`; it
+  does not restart the OCR engine, CaptureProducer, or mutate persisted config.
+- Reset does not alter detector 48x12 / 0.006, force interval, or confirmation
+  budget defaults. Stabilizer consensus/history/stale rules are untouched.
+- `run_live` continues to call `reset()` at session start.
+
+## Phase 2H closure — change-gated OCR scheduling
+
+Purpose: change detection is an **optimization only**. The production pipeline is
+`CaptureFrame -> authoritative Recognition ROI crop -> optional ROI change gate ->
+OCR when required -> OCR stabilizer`; OCR correctness remains fully testable with
+the gate OFF.
+
+- **Scheduler priority (implemented):** `first_frame > detector_error > change >
+  confirmation > forced_refresh > unchanged`.
+- **Forced refresh** (`--force-ocr-interval-sec 3.0`) is the false-negative safety
+  net: a persistent real change that the detector misses is still OCR'd and can
+  stabilize/emit. Correctness never depends on `changed=True`.
+- **Detector failure fails open:** exceptions increment `change_detector_errors`,
+  emit `reason=detector_error`, and OCR; they are never counted as
+  `capture_errors` / `frames_failed` / `ocr_errors`.
+- **Bounded confirmation:** `max_confirmation_attempts=2` → at most `change OCR +
+  confirmation #1 + confirmation #2` per detected state (no unbounded loop); a
+  newer change supersedes the old budget with a fresh one.
+- **ROI geometry boundary:** the gate keys on the full pixel rect `(x, y, w, h)`;
+  a change clears the detector baseline + confirmation and forces the next frame
+  to `first_frame`.
+- **Explicit reset:** `OCRChangeGate.reset()` clears transient state (baseline,
+  confirmation, geometry, first-frame, force timing) while preserving counters.
+- **Stabilizer separation:** skipped frames call `tick()` only — no fake empty
+  OCR, no history/`raw_frames` change; an unchanged subtitle never stale-clears.
+- **Capture/queue safety:** `LatestFrameQueue` cap 1 newest-wins, no OCR overlap,
+  bounded producer stop, genuine `capture_errors` only (shutdown discard /
+  cancellation accounted separately, Phase 2H.1).
+- **Engine lifetime:** `engine_init_count == 1` per session.
+- **Diagnostic-only hooks (default OFF, no effect when absent):**
+  `--debug-force-unchanged`, `--debug-force-change-detector-error`,
+  `--debug-switch-roi-after-sec` / `--debug-switch-roi`,
+  `--debug-reset-scheduler-after-sec`. They never mutate persisted Recognition ROI.
+
+Frozen validated defaults (code constants): full-frame `(32,20)`/`0.005`; ROI
+detector `(48,12)`/`0.006`; `consensus_required=2`, `history_size=3`,
+`stale_timeout_sec=2.0`, `min_line_confidence=0.70`, `max_confirmation_attempts=2`,
+`force_ocr_interval_sec=3.0`; diagnostic FPS default 1; gate + stabilizer opt-in
+(OFF). The validated device invocation additionally passes `--ort-intra-threads 2
+--ort-inter-threads 1 --opencv-threads 1 --det-limit-type min
+--det-limit-side-len 256` (these remain explicit CLI values, not code defaults).
+
+True-device gates: H1, H2, 2H.1, H3, 2H.2→2H.3, H4, H5, H6, H7 all PASS/CLOSED.
+Local suite: 540 tests, 0 failures, 2 platform skips; `pnpm build` PASS.
+
+## Phase 2I.1 stable text event transport
+
+- Transport foundation for the OCR worker's stabilizer output; no rendering,
+  translation, or OCR UI.
+- **Protocol v1** (`ocr/transport.py`, pure stdlib): newline-delimited JSON
+  envelope
+  `{"v":1,"type":"stable_text","event_seq":N,"kind":"text|clear","text":...,"confidence":...,"source_seq":...,"timestamp_monotonic":...}`.
+  `event_seq` is a per-worker-session counter starting at 1 and incrementing by 1
+  per emitted stable event; `source_seq` remains the capture/OCR frame sequence.
+  Strict validation rejects invalid JSON/non-object, unknown `v`/`type`/`kind`,
+  `event_seq<=0`, non-finite/negative timestamps, empty/invalid text, invalid
+  confidence, invalid `source_seq`, malformed clear events, and lines > 64 KiB.
+- **Backend receiver** (`backend/ocr_transport.py`, pure stdlib):
+  `OCRTransportReceiver` parses one line, enforces per-session `event_seq`
+  monotonicity (duplicates/out-of-order rejected without overwriting last good
+  state), and keeps a bounded `StableOCRState` (worker_session_id, last_event_seq,
+  kind, text, confidence, source_seq, timestamp_monotonic). `begin_session()`
+  resets the boundary to 0 with a fresh opaque uuid4 session id. Counters:
+  `transport_messages_received/rejected/out_of_order/text_events/clear_events`,
+  `last_transport_error`. Malformed input never becomes `capture_errors`/
+  `ocr_errors`.
+- **Backend RPCs** (`main.py`): read-only `get_ocr_transport_status()` and
+  `get_latest_stable_text()`. They never start OCR.
+- **Diagnostic emission** (`scripts/ocr_test.py`): opt-in `--emit-stable-jsonl`
+  (default OFF). When on, machine JSONL goes to **stdout** and all diagnostics are
+  redirected to **stderr** (`contextlib.redirect_stdout(sys.stderr)`); the
+  stabilizer emits exactly one flushed line per stable event via
+  `envelope_from_event`/`encode_envelope`. Emission failures never break the loop.
+- **Native dependency isolation:** `main.py` and the transport modules import no
+  numpy/cv2/onnxruntime/rapidocr/omegaconf/antlr4 (asserted by a subprocess
+  import-safety test). No OCR auto-start, no daemon, no second singleton.
+
+## Phase 2I.2 backend OCR worker lifecycle
+
+- `scripts/ocr_worker.py` is the production child entrypoint: runs the validated
+  pipeline via `ocr_test.OCRDiagnostic` (capture -> ROI -> optional gate ->
+  PP-OCRv6 -> stabilizer), emits protocol v1 JSONL on **stdout**, diagnostics on
+  **stderr**. Frozen baseline defaults: FPS 1, ORT intra 2 / inter 1, OpenCV 1,
+  `Det.limit_type=min`, `Det.limit_side_len=256`, stable output ON, change gate
+  **opt-in (OFF)**. A `--parent-pid` watchdog exits the worker (SIGINT) if the
+  owning backend disappears.
+- `backend/ocr_worker.py` (`OCRWorkerManager`, pure stdlib) owns exactly one
+  child: state machine `STOPPED -> STARTING -> RUNNING -> STOPPING -> STOPPED`
+  (or `FAILED`). Explicit start only (idempotent while STARTING/RUNNING);
+  unexpected exit → `FAILED` with the exit code, **no auto-restart**. Status query
+  never spawns.
+- Spawn policy: system python from `overlay_manager.resolve_python3` (never a
+  PluginLoader/decky interpreter), `cwd=plugin root`, `PYTHONNOUSERSITE=1`,
+  `PYTHONPATH=plugin root`, `stdin=DEVNULL`, `stdout/stderr=PIPE`, `shell=False`,
+  no `setsid`/`start_new_session`. `--parent-pid` is passed to the child.
+- Each start calls `receiver.begin_session()` (fresh uuid4 session id, resets
+  `last_event_seq`/counters); the child's JSONL starts at `event_seq=1`. The
+  stdout reader feeds `OCRTransportReceiver` with the 64 KiB line bound; malformed
+  / oversized / out-of-order lines are counted and never overwrite the last good
+  state or crash the backend. stderr is drained into a bounded 200-line tail.
+- Stop: bounded escalation on the exact owned PID (`wait` → SIGINT → SIGTERM →
+  SIGKILL), then joins reader/monitor threads; idempotent when already STOPPED.
+  `RLock` guards state so `start()`/`stop()` may call `status()` reentrantly.
+- RPCs (`main.py`): `start_ocr_worker(change_gate=False)`, `stop_ocr_worker()`,
+  `get_ocr_worker_status()`; read-only `get_ocr_transport_status()` /
+  `get_latest_stable_text()` remain. Start requires the backend **leader** and is
+  rejected with `capture_conflict` while a `CaptureProducer` is RUNNING (single
+  capture owner). `_unload`/`_uninstall` stop the worker.
+- Native dependency isolation preserved: `main.py`, `backend/*` import no
+  numpy/cv2/onnxruntime/rapidocr/omegaconf/antlr4 (subprocess import-safety gate).
+
+### Phase 2I.2.1 explicit-stop latency fix
+
+- Device D1 measured `stop_elapsed_sec≈3.666`: `_terminate` did an unconditional
+  `wait(timeout)` **before** signalling, adding the full cooperative timeout to
+  every normal stop of a live long-running worker.
+- New order: `poll()` (skip if already exited) → `SIGINT` exact PID immediately →
+  bounded wait → `SIGTERM` → bounded wait → `SIGKILL` last resort. No pre-signal
+  wait; an already-exited child is never signalled.
+- `stop()` now joins the reader/monitor threads **outside** the `RLock` so the
+  monitor can complete its own locked section (previously the join-within-lock
+  could leave the monitor alive until the join timed out).
+- Intentional SIGINT exit code 130 remains `STOPPED`, not `FAILED`; unexpected
+  exit still `FAILED` with no auto-restart. Local suite time for the manager
+  tests dropped 10.2s → 2.2s, confirming the removed wait.
+
+### Phase 2I.2.2 parent-death / orphan-worker safety
+
+- Device D4 failed: after the backend did an abrupt `os._exit(0)`, the worker
+  stayed alive (`worker_still_alive`, `orphan OCR worker still alive`).
+- Root cause: the userspace watchdog used `/proc/<pid>` existence + `kill(pid, 0)`.
+  An exited-but-not-reaped parent is a **zombie** that still has `/proc/<pid>` and
+  accepts signal 0, so liveness never reported death (PID reuse would be a similar
+  false-positive).
+- Fix: `backend/parent_death.py` (pure stdlib) arms the kernel
+  `prctl(PR_SET_PDEATHSIG, SIGINT)` via libc, so the kernel signals the worker when
+  the parent thread dies — independent of zombie state or reaping. After arming it
+  verifies `os.getppid() == expected` and fails closed on the
+  parent-died-before-arm race. `parent_changed()` compares the parent
+  **relationship**, never bare PID existence.
+- `scripts/ocr_worker.py` arms protection **early** — right after arg parsing,
+  before `activate_plugin_ocr_runtime`/`OCRRuntime` — with `--parent-pid` defaulting
+  to `None` (standalone runs skip; an explicit pid `<= 1` or a changed parent fails
+  closed, exit 2). The watchdog is retained as a secondary defense but now checks
+  `getppid()`; the old `_pid_alive` PID-existence loop is removed.
+- `SIGINT` keeps the validated clean-shutdown path (exit 130). No daemon, no
+  `setsid`, no process-group signals; the worker remains a direct child.
+- Tests: `scripts/test_parent_death.py` (helper units + a **real Linux subprocess
+  test** that spawns a child with PDEATHSIG armed, has the parent `os._exit(0)`, and
+  asserts the child disappears on its own; Linux-only, skipped on Windows).
+  True-device D4 retest still pending.
+
+### Phase 2I.2.3 production launch default path resolution
+
+- Device D6 preflight showed the production RPC path could emit
+  `--model-dir None` (and no `--roi-config`): `ClarifyDeckEngine.start_ocr_worker`
+  calls `manager.start(fps, change_gate)` without `model_dir`/`roi_config`, and
+  `build_command` serialized a `None` path.
+- `OCRWorkerManager` now resolves canonical defaults itself:
+  - **model dir:** `model_dir or <plugin_root>/models/ppocrv6`, validated before
+    spawn — the directory must exist and contain the required files (read from
+    `manifest.json` `files`, falling back to `PP-OCRv6_det_small.onnx` /
+    `PP-OCRv6_rec_small.onnx`). Missing dir/files → `OCRWorkerError("model_missing")`
+    with **no child spawned**; no runtime download.
+  - **ROI config:** `roi_config or <settings_root>/recognition_roi.json`, where
+    `settings_root` is supplied by `main.py` as `roi_config_path().parent` (the
+    same Decky settings dir the Recognition ROI system owns). No second precedence
+    system; a missing file falls back to the existing `ROIConfigStore` defaults.
+- `build_command` never serializes `None` into a path argument; `start()` passes
+  `model_dir`/`roi_config` through unchanged (validation happens before `Popen`).
+- Tests (`ProductionLaunchPathTest`) use temp plugin/settings roots (no `/home/deck`
+  dependency) and assert the exact production RPC argv contains a real model path
+  and canonical ROI config path with no `"None"`.
+- Device D6 retest pending.
+
+## Phase 2I.2 closure — backend OCR worker lifecycle
+
+Ownership: only the backend **leader** starts exactly one OCR child via an explicit
+`start_ocr_worker()`; the worker runs the frozen pipeline
+(capture → authoritative Recognition ROI → optional change gate → PP-OCRv6 →
+stabilizer) and emits `stable_text` protocol v1 JSONL on stdout / diagnostics on
+stderr; the backend `OCRTransportReceiver` holds the latest stable state. No
+rendering, no translation, no frontend subtitle presentation.
+
+- **State machine:** `STOPPED → STARTING → RUNNING → STOPPING → STOPPED`; an
+  unexpected exit goes `RUNNING → FAILED` with `pid=None` + `exit_code` +
+  `last_error`, and there is **no auto-restart** (`FAILED → STARTING` only via an
+  explicit new `start()`). `start()` is idempotent while STARTING/RUNNING (same
+  PID/session, no second spawn).
+- **Fresh session:** every real start calls `receiver.begin_session()` → new
+  `worker_session_id`, `last_event_seq=0`, counters reset; the child's first event
+  is `event_seq=1`. Session identity is never inferred from PID alone.
+- **Safe spawn:** `overlay_manager.resolve_python3` (PluginLoader/decky rejected),
+  `cwd=plugin root`, `PYTHONNOUSERSITE=1`, `PYTHONPATH=plugin root`,
+  `stdin=DEVNULL`, `stdout/stderr=PIPE`, `shell=False`, no setsid/`start_new_session`.
+- **Production default paths:** model dir resolves to
+  `<plugin_root>/models/ppocrv6` (validated against the manifest's files before
+  spawn; `model_missing` + no child on failure, no runtime download); ROI config
+  resolves to `<settings_root>/recognition_roi.json` (the same settings root the
+  Recognition ROI system owns; missing file → existing `ROIConfigStore` defaults).
+  No argv path is ever the literal `None`.
+- **Transport:** stdout reader continuously feeds `OCRTransportReceiver` with the
+  64 KiB line bound; stderr drains into a bounded 200-line tail; malformed /
+  oversized / out-of-order lines are counted and preserve last good state and never
+  become `capture_errors`/`ocr_errors`.
+- **Stop (2I.2.1):** `stop_requested → SIGINT exact PID immediately → bounded wait
+  → SIGTERM → bounded wait → SIGKILL last resort → reader cleanup → STOPPED`. No
+  unconditional pre-signal wait; already-exited children are never signalled;
+  SIGINT exit 130 is `STOPPED`, not `FAILED`. Device: stop ≈3.666 s → ≈0.615 s.
+- **Parent death (2I.2.2):** worker arms `prctl(PR_SET_PDEATHSIG, SIGINT)` early
+  (before OCR init), then verifies `os.getppid()` still matches the expected
+  parent; fail closed on invalid pid / changed parent / setup failure. Secondary
+  watchdog uses the parent relationship, never bare PID existence. Device D4:
+  abrupt parent `os._exit(0)` → worker terminates on its own.
+- **Leader/capture guards:** `start_ocr_worker` rejects `not_leader` and
+  `capture_conflict` (backend `CaptureProducer` RUNNING) before `manager.start()`;
+  no second capture loop runs silently.
+- **No auto-start:** `get_ocr_transport_status` / `get_latest_stable_text` never
+  create the manager; `get_ocr_worker_status` may lazy-create the pure-stdlib
+  manager but never calls `start()`; `stop_ocr_worker` never starts. `_unload` /
+  `_uninstall` stop the worker explicitly.
+- **Native isolation:** `main.py` + `backend/*` import no
+  rapidocr/onnxruntime/numpy/cv2/omegaconf/antlr4; native OCR loads only in the
+  child.
+- **Frozen worker defaults:** FPS 1, ORT intra 2 / inter 1, OpenCV 1,
+  `Det.limit_type=min`, `Det.limit_side_len=256`, stable output ON, change gate
+  **OFF**; force interval 3.0, min line confidence 0.70, consensus 2, history 3,
+  stale 2.0, `max_confirmation_attempts=2`. Recognition ROI remains frozen from
+  Phase 2E.2.
+- **Device gates:** D1, 2I.2.1, D2, D3, D4, 2I.2.2, D5, D6, 2I.2.3 all PASS/CLOSED
+  (D6-B: production-default start → RUNNING → live stable event → rejected=0 →
+  out_of_order=0 → explicit stop → STOPPED, child gone, stop≈0.615 s, exit=0).
+- **Local suite:** 634 tests, 0 failures, 3 platform skips (1 Linux-only
+  parent-death subprocess test on Windows + 2 flock); `pnpm build` PASS.
+
+## Phase 2I.3 QAM diagnostic OCR control
+
+- The Decky QAM gains an explicit **OCR Diagnostic** panel
+  (`src/components/OCRDiagnostic.tsx`, pure logic in `src/ocrDiagnostic.ts`,
+  mounted from `src/index.tsx`). The backend remains the single source of truth.
+- Controls: worker state (+PID), Start OCR, Stop OCR, a "Use change-gated OCR"
+  toggle (default **OFF**, disabled while RUNNING and applied only on the next
+  explicit start), transport session/event status, latest stable text, last
+  confidence/source sequence, and last error. No translation, no persistent
+  overlay, no frontend process spawn.
+- RPCs reused only (no new lifecycle APIs): `start_ocr_worker(change_gate)`,
+  `stop_ocr_worker()`, `get_ocr_worker_status()`, `get_latest_stable_text()`.
+  Polling is read-only at ~1 Hz (`POLL_INTERVAL_MS = 1000`), and the timer is
+  cleared on unmount; mount/QAM-open/polling never call `start_ocr_worker`.
+- Start/Stop are explicit and de-duplicated: the handler guards plus a `busy`
+  flag disable repeat calls; structured backend errors (`not_leader`,
+  `capture_conflict`, `ocr_worker_unavailable`, `model_missing`,
+  `forbidden_interpreter`) map to concise messages with **no auto-retry**.
+- Stable text is rendered exactly as returned (`white-space: pre-wrap`); `clear`
+  shows `(no stable text)`, no event shows `(waiting for stable text)`.
+  Frontend event identity is `(worker_session_id, last_event_seq)` so repeated
+  polls are not new events and a new session resets identity.
+- QAM close/reopen does not start or stop the worker; on reopen the RUNNING state
+  and latest text are restored from the backend.
+- Frontend harness: `scripts/test_frontend_ocr_diagnostic.mjs` (55 checks after
+  Phase 2I.3.2) run via `pnpm test` — pure-logic behavior + static guards
+  (mount/effect must not call start/stop; polling read-only + timer cleanup; no
+  translation/overlay/spawn).
+- No production backend changes (RPCs already existed).
+
+### Phase 2I.3.1 shared transport receiver wiring fix
+
+- **Trigger:** Steam Deck D2 showed `Event #1 / Received 1 / Rejected 0` in the QAM
+  worker status while `latest_stable_text` stayed `(waiting for stable text)`.
+- **Root cause:** the engine and the manager owned two independent
+  `OCRTransportReceiver` instances. `ClarifyDeckEngine._ocr_worker_manager()` built
+  `OCRWorkerManager` without a receiver, so `OCRWorkerManager.start()` allocated its
+  own via `transport_factory`; the stdout reader fed the manager's receiver while
+  `get_latest_stable_text()` / `get_ocr_transport_status()` read the untouched
+  engine receiver (`event_seq=0`, no text).
+- **Fix:** the engine remains the single receiver owner. `_ocr_worker_manager()`
+  obtains `self._transport_receiver()` and injects it as
+  `OCRWorkerManager(transport_receiver=receiver)`. The manager reuses that exact
+  object and never allocates a competing production receiver; if transport is
+  unavailable it returns the existing structured `ocr_worker_unavailable` path.
+- **Manager standalone behavior:** with no injected receiver the manager creates
+  exactly one receiver at `__init__` and reuses it across real starts.
+- **Fresh logical session preserved:** each real start still calls
+  `begin_session()` (new uuid4 `worker_session_id`, `last_event_seq=0`), and now
+  also explicitly resets the transport counters — required because the receiver
+  object is reused instead of reallocated per start. Repeated start while
+  STARTING/RUNNING stays idempotent (no `begin_session()`, same PID/session).
+- **Tests:** `scripts/test_backend_ocr_worker.py` gains `SharedReceiverWiringTest`
+  and `DirectIntegrationRegressionTest` (engine-owned receiver identity, shared
+  session/event state, `latest_stable_text` after a manager-path event, single
+  receiver construction, begin_session call counts, restart/reuse, counter reset).
+- **Device D2 retest PASS** (shared-receiver fix closed): explicit Start OCR →
+  RUNNING → one worker PID → Event #1 → stable text + confidence/source_seq visible
+  in QAM → rejected=0 / out_of_order=0; QAM close/reopen preserves PID/session/text
+  (D3); explicit Stop → STOPPED with no worker process (D4).
+
+### Phase 2I.3.2 temporary capture diagnostic controls
+
+- Temporary QAM **Capture Diagnostic** controls were added to
+  `src/components/OCRDiagnostic.tsx` solely to make the Phase 2I.3 D5 device test
+  possible without GamepadUI DevTools: prove that `Start OCR` returns the backend
+  `capture_conflict` guard while a `CaptureProducer` is RUNNING.
+- Reuses existing RPCs only — `capture_producer_start(1.0)`,
+  `capture_producer_stop()`, `capture_producer_status()`. No new backend API and
+  **no backend lifecycle changes**; `main.py`, `backend/*`, the capture producer,
+  OCR worker/scheduler, ROI, transport, overlay, and translation are untouched.
+- **Explicit only:** lifecycle changes come from button presses. The controls are
+  never started on component mount / QAM open / polling, are never stopped on QAM
+  close, and have no auto-retry. Cadence is the fixed diagnostic **1 FPS**.
+- Capture status is polled read-only on the existing 1 Hz timer (one timer
+  services both OCR and capture status); it shows state, `target_fps`,
+  `frames_succeeded`, `frames_failed`, and `last_error`.
+- **OCR Start is not frontend-blocked** by a RUNNING capture producer: the existing
+  handler still issues the explicit request so the backend `capture_conflict` path
+  stays testable; the mapped error is surfaced from the RPC result.
+- Marked in code/docs as a **temporary Phase 2I.3 diagnostic control**; it is not a
+  product feature and is slated for removal/consolidation in the planned
+  post-2I.3 cleanup (not deleted automatically after D5).
+- Frontend harness extended (`scripts/test_frontend_ocr_diagnostic.mjs`, 55 checks).
+- **Device D5 PASS:** `CaptureProducer RUNNING → explicit Start OCR →` backend
+  `capture_conflict` surfaced in QAM → OCR worker remains STOPPED with no
+  `scripts/ocr_worker.py` process → CaptureProducer remains RUNNING → explicit
+  Stop Capture Diagnostic → CaptureProducer STOPPED.
+
+### Phase 2I.3 closure
+
+- **Status: Phase 2I.3 — QAM Diagnostic OCR Control + Live Stable Text — PASS /
+  CLOSED.**
+- Device gates D1–D5 all PASS: no OCR/capture auto-start on QAM open or polling;
+  explicit Start → RUNNING → live stable text; QAM close/reopen preserves backend
+  worker PID/session/text; explicit Stop → exact-PID exit; backend
+  `capture_conflict` guard proven from the QAM surface.
+- Frozen contracts verified unchanged: explicit QAM Start/Stop only; Change Gate
+  default **OFF** (next-start only, disabled while RUNNING/STARTING); single 1 Hz
+  read-only poll timer cleared on unmount; backend source of truth; no translation,
+  no persistent overlay, no frontend OCR/process spawn; structured error mapping
+  with no auto-retry; `capture_conflict` originates from the backend Start OCR
+  result, never synthesized in the frontend.
+- Shared receiver (Phase 2I.3.1) and backend worker lifecycle (Phase 2I.2) remain
+  intact: one engine-owned `OCRTransportReceiver`; fresh `begin_session()` per real
+  start (new session id, `event_seq`/counters reset); idempotent repeated start;
+  no auto-restart; parent-death safety; production default model/ROI paths; native
+  import isolation.
+- Local regression at closure: Python 646 tests / 0 failures / 3 platform skips;
+  frontend harness 55 checks PASS; `pnpm build` PASS; import-safety OK.
+- The temporary Capture Diagnostic subsection (Phase 2I.3.2) is intentionally kept
+  until the dedicated cleanup phase. Cleanup candidates are recorded in the
+  separately reviewed cleanup phase; long-term safety regression tests are not
+  disposable.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

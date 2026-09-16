@@ -17,6 +17,7 @@ import {
 } from "@decky/api";
 import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { FaSearchPlus } from "react-icons/fa";
+import { OCRDiagnosticSection } from "./components/OCRDiagnostic";
 
 type BoxState = {
   id: string;
@@ -673,6 +674,8 @@ function Content() {
           {status?.enabled ? "Stop OCR capture" : "Start OCR capture"}
         </ButtonItem>
       </PanelSectionRow>
+
+      <OCRDiagnosticSection />
 
       <PanelSection title="Recognition Area">
         <PanelSectionRow>

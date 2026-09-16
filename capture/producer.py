@@ -38,6 +38,9 @@ class CaptureProducerStats:
     consecutive_failures: int = 0
     late_ticks: int = 0
     last_error: Optional[str] = None
+    last_error_category: Optional[str] = None
+    capture_cancellations: int = 0
+    shutdown_discarded_frames: int = 0
     started_monotonic: Optional[float] = None
 
 
@@ -101,6 +104,7 @@ class CaptureProducer:
             self._stats.target_fps = self._target_fps
             self._stats.consecutive_failures = 0
             self._stats.last_error = None
+            self._stats.last_error_category = None
             self._stats.started_monotonic = self._clock()
             self._stop_requested = False
             self._task = asyncio.create_task(self._run(), name="clarifydeck-capture-producer")
@@ -154,6 +158,7 @@ class CaptureProducer:
             self._stats.state = ProducerState.STOPPED.value
             self._stats.consecutive_failures = 0
             self._stats.last_error = None
+            self._stats.last_error_category = None
         return self.status()
 
     # -- loop --------------------------------------------------------------
@@ -173,21 +178,39 @@ class CaptureProducer:
                     frame = await self._runner(
                         self._capture.capture_frame, "base_plane_only", self._capture_timeout
                     )
+                except asyncio.CancelledError:
+                    # Expected shutdown cancellation: never a capture failure.
+                    self._stats.capture_cancellations += 1
+                    self._stats.last_error_category = "stop_cancellation"
+                    self._log("[capture-producer] cancelled reason=stop_requested")
+                    raise
                 except Exception as exc:  # one failure must not kill the loop
                     self._stats.frames_attempted += 1
-                    self._stats.frames_failed += 1
-                    self._stats.consecutive_failures += 1
-                    self._stats.last_error = f"{type(exc).__name__}: {exc}"
-                    self._queue.note_capture_error()
-                    self._log(f"[capture-producer] capture failed: {self._stats.last_error}")
-                    if self._stats.consecutive_failures >= self._max_failures:
-                        self._state = ProducerState.FAILED
-                        self._stats.state = ProducerState.FAILED.value
+                    if self._stop_requested:
+                        # Stop was requested while this capture was in flight: this is
+                        # shutdown bookkeeping, not a genuine capture failure.
+                        self._stats.capture_cancellations += 1
+                        self._stats.last_error_category = "stop_during_capture"
+                        self._stats.last_error = f"{type(exc).__name__}: {exc}"
                         self._log(
-                            f"[capture-producer] failed consecutive_failures="
-                            f"{self._stats.consecutive_failures}"
+                            f"[capture-producer] shutdown_discard reason=stop_during_capture "
+                            f"error={self._stats.last_error}"
                         )
-                        return
+                    else:
+                        self._stats.frames_failed += 1
+                        self._stats.consecutive_failures += 1
+                        self._stats.last_error_category = "capture_operation_error"
+                        self._stats.last_error = f"{type(exc).__name__}: {exc}"
+                        self._queue.note_capture_error()
+                        self._log(f"[capture-producer] capture failed: {self._stats.last_error}")
+                        if self._stats.consecutive_failures >= self._max_failures:
+                            self._state = ProducerState.FAILED
+                            self._stats.state = ProducerState.FAILED.value
+                            self._log(
+                                f"[capture-producer] failed consecutive_failures="
+                                f"{self._stats.consecutive_failures}"
+                            )
+                            return
                 else:
                     elapsed_ms = (self._clock() - started) * 1000.0
                     self._stats.frames_attempted += 1
@@ -199,6 +222,12 @@ class CaptureProducer:
                     self._stats.avg_capture_ms = round(
                         self._capture_total_ms / self._stats.frames_succeeded, 1
                     )
+                    if self._stop_requested:
+                        # Successful capture but shutdown already requested: discard
+                        # it (do not publish) and account separately.
+                        self._stats.shutdown_discarded_frames += 1
+                        self._log(f"[capture-producer] shutdown_discard seq={frame.sequence}")
+                        break
                     await self._queue.put_latest(frame)
 
                 if self._stop_requested:
@@ -230,6 +259,9 @@ class CaptureProducer:
             "consecutive_failures": self._stats.consecutive_failures,
             "late_ticks": self._stats.late_ticks,
             "last_error": self._stats.last_error,
+            "last_error_category": self._stats.last_error_category,
+            "capture_cancellations": self._stats.capture_cancellations,
+            "shutdown_discarded_frames": self._stats.shutdown_discarded_frames,
             "started_monotonic": self._stats.started_monotonic,
             "queue": self._queue.stats().__dict__,
         }

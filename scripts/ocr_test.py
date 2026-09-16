@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import sys
@@ -40,16 +41,20 @@ from capture.errors import CaptureError  # noqa: E402
 from capture.frame import CaptureFrame  # noqa: E402
 from capture.latest_frame_queue import LatestFrameQueue  # noqa: E402
 from capture.producer import CaptureProducer  # noqa: E402
+from capture.scheduler import OCRChangeGate, validate_force_interval  # noqa: E402
 from ocr import (  # noqa: E402
     BundleError,
     OCRConfig,
     OCRError,
     OCRRuntime,
+    OCRStabilizer,
+    StabilizerConfigError,
     activate_plugin_ocr_runtime,
     predict_det_geometry,
     probe_report_lines,
     probe_runtime,
 )
+from ocr.transport import encode_envelope, envelope_from_event  # noqa: E402
 
 
 class OCRState(str, Enum):
@@ -88,6 +93,16 @@ def process_frame_timed(frame: CaptureFrame, *, runtime: OCRRuntime, app_id=None
         timings["decode_ms"] + timings["roi_crop_ms"] + timings["ocr_wall_ms"], 3
     )
     return roi_frame, result, timings
+
+
+class _StaticResolver:
+    """Diagnostic-only resolver with a mutable ROI (for H6 ROI-switch testing)."""
+
+    def __init__(self, roi) -> None:
+        self.roi = roi
+
+    def resolve(self, app_id=None):
+        return recognition_roi.RecognitionROI(self.roi, "debug")
 
 
 def _rss_kb() -> Optional[int]:
@@ -185,10 +200,20 @@ class OCRDiagnostic:
     MAX_CONSECUTIVE_ERRORS = 3
     RECENT_LIMIT = 12
 
-    def __init__(self, args, runtime: OCRRuntime, resolver=None) -> None:
+    def __init__(self, args, runtime: OCRRuntime, resolver=None, stabilizer=None, gate=None, machine_stream=None) -> None:
         self.args = args
         self.runtime = runtime
         self.resolver = resolver
+        self.stabilizer = stabilizer
+        self.gate = gate
+        self.machine_stream = machine_stream
+        self._stable_event_seq = 0
+        self._debug_resolver = None
+        self._debug_switch_roi = None
+        self._debug_switch_after = None
+        self._roi_switched = False
+        self._debug_reset_after = None
+        self._scheduler_reset = False
         self.state = OCRState.STOPPED
         self.frames_received = 0
         self.frames_ocr = 0
@@ -206,6 +231,39 @@ class OCRDiagnostic:
         self.correlations: list = []
         self.saved_roi = False
         self.det_input_logged = False
+
+    def _stabilize(self, result) -> None:
+        """Feed one OCR frame into the stabilizer and print stable diagnostics."""
+        try:
+            events = self.stabilizer.observe(result.lines, result.sequence, time.monotonic())
+        except Exception as exc:
+            print(f"[ocr-stable] error detail={exc}", flush=True)
+            return
+        candidate = self.stabilizer.last_candidate
+        candidate_text = candidate.text if candidate is not None else ""
+        print(f'[ocr-stable] candidate="{candidate_text}"', flush=True)
+        print(
+            f"[ocr-stable] consensus={self.stabilizer.last_consensus}/{self.stabilizer.consensus_required}",
+            flush=True,
+        )
+        for event in events:
+            if event.kind == "text":
+                conf = "None" if event.confidence is None else f"{event.confidence:.3f}"
+                print(
+                    f'[ocr-stable] emit=text seq={event.source_seq} conf={conf} text="{event.text}"',
+                    flush=True,
+                )
+            else:
+                print("[ocr-stable] emit=clear", flush=True)
+        if self.machine_stream is not None:
+            for event in events:
+                self._stable_event_seq += 1
+                try:
+                    envelope = envelope_from_event(self._stable_event_seq, event)
+                    self.machine_stream.write(encode_envelope(envelope) + "\n")
+                    self.machine_stream.flush()
+                except Exception as exc:  # must never break the OCR loop
+                    print(f"[ocr-stable] emit_error detail={exc}", flush=True)
 
     def _correlate(self, result, timings: dict) -> None:
         """Bounded recent table: sequence / ocr_wall_ms / det_ms / capture timing."""
@@ -270,7 +328,9 @@ class OCRDiagnostic:
             capture = gamescope_capture.GamescopeCapture(logger=lambda m: print(m, file=sys.stderr))
         else:
             capture = _MockCapture(self.args)
-        self._producer = CaptureProducer(capture, self._queue, target_fps=self.args.fps)
+        self._producer = CaptureProducer(
+            capture, self._queue, target_fps=self.args.fps, logger=lambda m: print(m, flush=True)
+        )
         self._stop_event = asyncio.Event()
         self._proc_start = time.process_time()
         self._wall_start = time.monotonic()
@@ -282,6 +342,19 @@ class OCRDiagnostic:
         self._shutdown_done = False
         self._interrupted = False
         self._consumer_task = None
+        if self.stabilizer is not None:
+            self.stabilizer.reset()
+        if self.gate is not None:
+            self.gate.reset()
+        self._stable_event_seq = 0
+        if getattr(self.args, "debug_switch_roi", None) is not None:
+            base_roi = recognition_roi.get_resolver().resolve(self.args.app_id).roi
+            self._debug_resolver = _StaticResolver(base_roi)
+            self._debug_switch_roi = self.args.debug_switch_roi
+            self._debug_switch_after = getattr(self.args, "debug_switch_roi_after_sec", None) or 5.0
+            self._roi_switched = False
+        self._debug_reset_after = getattr(self.args, "debug_reset_scheduler_after_sec", None)
+        self._scheduler_reset = False
 
         for line in _oversubscription_lines(self.args, self.runtime):
             print(line, flush=True)
@@ -334,13 +407,7 @@ class OCRDiagnostic:
                     self._rss_peak = max(self._rss_peak or 0, current)
                 continue
             try:
-                roi_frame, result, timings = await asyncio.to_thread(
-                    process_frame_timed,
-                    frame,
-                    runtime=self.runtime,
-                    app_id=self.args.app_id,
-                    resolver=self.resolver,
-                )
+                await self._process_and_record(frame, wait_ms)
             except (OCRError, CaptureError) as exc:
                 code = getattr(exc, "code", "ocr_error")
                 self.ocr_errors += 1
@@ -351,36 +418,137 @@ class OCRDiagnostic:
                     return
                 continue
             self.consecutive_errors = 0
+
+    def _effective_resolver(self):
+        return self._debug_resolver if self._debug_resolver is not None else self.resolver
+
+    async def _process_and_record(self, frame, wait_ms: float) -> None:
+        if self.gate is not None and self._debug_reset_after is not None and not self._scheduler_reset:
+            if time.monotonic() - self._wall_start >= self._debug_reset_after:
+                before = self.gate.stats().ocr_trigger_first
+                self.gate.reset()
+                self._scheduler_reset = True
+                print(
+                    f"[ocr-scheduler] debug_scheduler_reset reset=1 "
+                    f"ocr_trigger_first_before={before}",
+                    flush=True,
+                )
+        if self._debug_resolver is not None and not self._roi_switched:
+            if time.monotonic() - self._wall_start >= (self._debug_switch_after or 0.0):
+                self._debug_resolver.roi = self._debug_switch_roi
+                self._roi_switched = True
+                print(
+                    f"[ocr-scheduler] debug_roi_switch roi={self._debug_switch_roi.as_tuple()}",
+                    flush=True,
+                )
+        if self.gate is not None:
+            roi_frame, result, decision, timings = await asyncio.to_thread(self._gated_frame, frame)
+            if getattr(self.args, "debug", False):
+                if decision.roi_geometry_changed:
+                    print(
+                        f"[ocr-scheduler] roi_geometry_changed new={decision.roi_geometry} reset=1",
+                        flush=True,
+                    )
+                suffix = (
+                    f" remaining={decision.confirmation_remaining}"
+                    if decision.reason == "confirmation"
+                    else ""
+                )
+                print(
+                    f"[ocr-scheduler] seq={frame.sequence} changed={decision.changed} "
+                    f"action={decision.action} reason={decision.reason}{suffix}",
+                    flush=True,
+                )
+            if decision.action == "skip":
+                # Skipped OCR is NOT an empty OCR result; advance time only.
+                if self.stabilizer is not None:
+                    self.stabilizer.tick(time.monotonic())
+                return
             self.roi_width = roi_frame.width
             self.roi_height = roi_frame.height
-            timings["capture_wait_ms"] = wait_ms
-            timings["capture_age_ms"] = round(
-                max(0.0, (time.monotonic() - frame.captured_monotonic) * 1000.0), 3
+        else:
+            roi_frame, result, timings = await asyncio.to_thread(
+                process_frame_timed,
+                frame,
+                runtime=self.runtime,
+                app_id=self.args.app_id,
+                resolver=self.resolver,
             )
-            if not self.det_input_logged:
-                print(_det_input_line(roi_frame.width, roi_frame.height, self.args), flush=True)
-                self.det_input_logged = True
-            self._record(result, timings)
-            self._emit(result)
-            self._correlate(result, timings)
-            self._stats.add(
-                result.elapsed_ms,
-                cpu_ms=timings.get("ocr_process_cpu_ms"),
-                stages={
-                    "decode_ms": timings.get("decode_ms"),
-                    "roi_crop_ms": timings.get("roi_crop_ms"),
-                    "rgba_to_array_ms": timings.get("rgba_to_array_ms"),
-                    "ocr_call_ms": timings.get("ocr_call_ms"),
-                    "result_normalize_ms": timings.get("result_normalize_ms"),
-                    "det_ms": timings.get("det_ms"),
-                    "rec_ms": timings.get("rec_ms"),
-                },
+            self.roi_width = roi_frame.width
+            self.roi_height = roi_frame.height
+        timings["capture_wait_ms"] = wait_ms
+        timings["capture_age_ms"] = round(
+            max(0.0, (time.monotonic() - frame.captured_monotonic) * 1000.0), 3
+        )
+        if not self.det_input_logged:
+            print(_det_input_line(roi_frame.width, roi_frame.height, self.args), flush=True)
+            self.det_input_logged = True
+        self._record(result, timings)
+        self._emit(result)
+        self._correlate(result, timings)
+        if self.stabilizer is not None:
+            self._stabilize(result)
+        if self.gate is not None:
+            needs = self.stabilizer.needs_confirmation if self.stabilizer is not None else False
+            self.gate.note_ocr_result(needs)
+        self._stats.add(
+            result.elapsed_ms,
+            cpu_ms=timings.get("ocr_process_cpu_ms"),
+            stages={
+                "decode_ms": timings.get("decode_ms"),
+                "roi_crop_ms": timings.get("roi_crop_ms"),
+                "rgba_to_array_ms": timings.get("rgba_to_array_ms"),
+                "ocr_call_ms": timings.get("ocr_call_ms"),
+                "result_normalize_ms": timings.get("result_normalize_ms"),
+                "det_ms": timings.get("det_ms"),
+                "rec_ms": timings.get("rec_ms"),
+            },
+        )
+        if getattr(self.args, "debug_roi_copy", None) and not self.saved_roi:
+            self._save_debug_roi(frame.sequence, roi_frame)
+        current = _rss_kb()
+        if current:
+            self._rss_peak = max(self._rss_peak or 0, current)
+
+    def _gated_frame(self, frame):
+        """Decode + crop once, run the change gate, and OCR only when required."""
+        decode_started = time.perf_counter()
+        decoded = decode_png_ex(frame.encoded_bytes)
+        decode_done = time.perf_counter()
+        roi_frame = recognition_roi.extract_recognition_roi(
+            decoded.rgba,
+            decoded.width,
+            decoded.height,
+            self.args.app_id,
+            resolver=self._effective_resolver(),
+        )
+        crop_done = time.perf_counter()
+        decision = self.gate.decide(
+            roi_frame.rgba,
+            roi_frame.width,
+            roi_frame.height,
+            frame.sequence,
+            frame.captured_monotonic,
+            roi_key=roi_frame.roi.as_tuple(),
+        )
+        timings = {
+            "decode_ms": round((decode_done - decode_started) * 1000.0, 3),
+            "roi_crop_ms": round((crop_done - decode_done) * 1000.0, 3),
+            "change_check_ms": decision.change_check_ms,
+            "ocr_wall_ms": 0.0,
+        }
+        result = None
+        if decision.action == "ocr":
+            result = self.runtime.recognize_rgba(
+                roi_frame.rgba, roi_frame.width, roi_frame.height, sequence=frame.sequence
             )
-            if getattr(self.args, "debug_roi_copy", None) and not self.saved_roi:
-                self._save_debug_roi(frame.sequence, roi_frame)
-            current = _rss_kb()
-            if current:
-                self._rss_peak = max(self._rss_peak or 0, current)
+            ocr_done = time.perf_counter()
+            timings["ocr_wall_ms"] = round((ocr_done - crop_done) * 1000.0, 3)
+            timings.update(self.runtime.last_timings)
+        timings["total_frame_pipeline_ms"] = round(
+            timings["decode_ms"] + timings["roi_crop_ms"] + timings["ocr_wall_ms"] + decision.change_check_ms, 3
+        )
+        return roi_frame, result, decision, timings
 
     async def _shutdown_live(self, reason: str) -> None:
         """Single idempotent shutdown path (normal completion, Ctrl-C, failure)."""
@@ -464,6 +632,27 @@ class OCRDiagnostic:
                 )
             if self.args.debug and self.correlations:
                 print(f"[ocr-correlation] {self.correlations}")
+            if self.stabilizer is not None:
+                print(f"[ocr-stable] stats={self.stabilizer.stats().__dict__}")
+            if self.gate is not None:
+                gate_stats = self.gate.stats()
+                payload = dict(gate_stats.__dict__)
+                payload["ocr_skip_ratio"] = gate_stats.ocr_skip_ratio
+                payload["avg_change_check_ms"] = gate_stats.avg_change_check_ms
+                print(f"[ocr-scheduler] stats={payload}")
+            producer = getattr(self, "_producer", None)
+            if producer is not None:
+                status = producer.status()
+                print(
+                    f"[capture-producer] state={status.get('state')} "
+                    f"frames_attempted={status.get('frames_attempted')} "
+                    f"frames_succeeded={status.get('frames_succeeded')} "
+                    f"frames_failed={status.get('frames_failed')} "
+                    f"capture_cancellations={status.get('capture_cancellations')} "
+                    f"shutdown_discarded_frames={status.get('shutdown_discarded_frames')} "
+                    f"last_error_category={status.get('last_error_category')} "
+                    f"last_error={status.get('last_error')}"
+                )
             print(f"[ocr] queue={queue_stats.__dict__}")
         except Exception as exc:
             print(f"[ocr] summary_failed detail={exc}", flush=True)
@@ -660,6 +849,17 @@ def _run_image(args, runtime: OCRRuntime) -> int:
     return 0 if result.line_count >= 1 else 1
 
 
+def _parse_roi(text: str):
+    parts = [p.strip() for p in text.split(",")]
+    if len(parts) != 4:
+        raise argparse.ArgumentTypeError("--debug-switch-roi must be x,y,w,h")
+    try:
+        x, y, w, h = (float(p) for p in parts)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--debug-switch-roi values must be numbers") from exc
+    return ocr_roi_mod.NormalizedROI(x, y, w, h)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="ClarifyDeck OCR diagnostic")
     parser.add_argument("--probe", action="store_true")
@@ -686,6 +886,46 @@ def main(argv=None) -> int:
     parser.add_argument("--opencv-threads", type=int, default=None, help="cv2.setNumThreads value")
     parser.add_argument("--det-limit-side-len", type=int, default=736, help="Det.limit_side_len")
     parser.add_argument("--det-limit-type", default="min", choices=("min", "max"), help="Det.limit_type")
+    parser.add_argument("--stable-output", action="store_true", help="enable OCR output stabilization")
+    parser.add_argument(
+        "--emit-stable-jsonl",
+        action="store_true",
+        help="emit stable events as JSONL on stdout (diagnostics go to stderr)",
+    )
+    parser.add_argument("--min-line-confidence", type=float, default=0.70)
+    parser.add_argument("--consensus-required", type=int, default=2)
+    parser.add_argument("--history-size", type=int, default=3)
+    parser.add_argument("--stale-timeout-sec", type=float, default=2.0)
+    parser.add_argument("--change-gate", action="store_true", help="skip OCR when the ROI is unchanged")
+    parser.add_argument("--force-ocr-interval-sec", type=float, default=3.0)
+    parser.add_argument(
+        "--debug-force-unchanged",
+        action="store_true",
+        help="diagnostic-only: force the scheduler-facing change result to unchanged",
+    )
+    parser.add_argument(
+        "--debug-force-change-detector-error",
+        action="store_true",
+        help="diagnostic-only: inject a change-detector exception (fail-open path)",
+    )
+    parser.add_argument(
+        "--debug-switch-roi-after-sec",
+        type=float,
+        default=None,
+        help="diagnostic-only: switch the diagnostic ROI after N seconds",
+    )
+    parser.add_argument(
+        "--debug-switch-roi",
+        type=_parse_roi,
+        default=None,
+        help="diagnostic-only: ROI to switch to (x,y,w,h normalized)",
+    )
+    parser.add_argument(
+        "--debug-reset-scheduler-after-sec",
+        type=float,
+        default=None,
+        help="diagnostic-only: call the production scheduler reset after N seconds",
+    )
     parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -717,6 +957,29 @@ def main(argv=None) -> int:
     except OCRError as exc:
         print(f"[ocr] config_error error={exc.code} detail={exc}")
         return 2
+    stabilizer = None
+    if args.stable_output:
+        try:
+            stabilizer = OCRStabilizer(
+                min_line_confidence=args.min_line_confidence,
+                consensus_required=args.consensus_required,
+                history_size=args.history_size,
+                stale_timeout_sec=args.stale_timeout_sec,
+            )
+        except StabilizerConfigError as exc:
+            print(f"[ocr] config_error error={exc.code} detail={exc}")
+            return 2
+    gate = None
+    if args.change_gate:
+        try:
+            gate = OCRChangeGate(
+                force_interval_sec=validate_force_interval(args.force_ocr_interval_sec),
+                force_unchanged=bool(getattr(args, "debug_force_unchanged", False)),
+                force_detector_error=bool(getattr(args, "debug_force_change_detector_error", False)),
+            )
+        except CaptureError as exc:
+            print(f"[ocr] config_error error={exc.code} detail={exc}")
+            return 2
     if args.probe:
         return _run_probe(args, runtime, activated)
     if args.repeat is not None:
@@ -730,13 +993,22 @@ def main(argv=None) -> int:
     if args.image:
         return _run_image(args, runtime)
     if args.live or args.mock:
+        emit_jsonl = bool(getattr(args, "emit_stable_jsonl", False))
+        machine_stream = sys.stdout if emit_jsonl else None
+        diagnostic = OCRDiagnostic(
+            args, runtime, stabilizer=stabilizer, gate=gate, machine_stream=machine_stream
+        )
         try:
-            return asyncio.run(OCRDiagnostic(args, runtime).run_live())
+            if emit_jsonl:
+                # machine JSONL stays on stdout; all diagnostics move to stderr
+                with contextlib.redirect_stdout(sys.stderr):
+                    return asyncio.run(diagnostic.run_live())
+            return asyncio.run(diagnostic.run_live())
         except KeyboardInterrupt:
-            print("[ocr] interrupted", flush=True)
+            print("[ocr] interrupted", file=sys.stderr, flush=True)
             return 130
         except asyncio.CancelledError:
-            print("[ocr] interrupted", flush=True)
+            print("[ocr] interrupted", file=sys.stderr, flush=True)
             return 130
     parser.print_help()
     return 2
