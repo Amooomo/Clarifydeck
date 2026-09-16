@@ -7,22 +7,15 @@ import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
 import { callable } from "@decky/api";
 import { type CSSProperties, useEffect, useRef, useState } from "react";
 import {
-  CAPTURE_DIAGNOSTIC_FPS,
   DEFAULT_CHANGE_GATE,
   POLL_INTERVAL_MS,
-  describeCaptureState,
   describeWorkerState,
-  isCaptureStartDisabled,
-  isCaptureStopDisabled,
   isChangeGateToggleDisabled,
   isStartDisabled,
   isStopDisabled,
-  mapCaptureError,
   mapOcrWorkerError,
-  renderCaptureStatus,
   renderStableText,
   shortSessionId,
-  type CaptureProducerStatus,
   type LatestStableText,
   type OCRWorkerStatus,
 } from "../ocrDiagnostic";
@@ -32,22 +25,12 @@ const stopOcrWorker = callable<[], OCRWorkerStatus>("stop_ocr_worker");
 const getOcrWorkerStatus = callable<[], OCRWorkerStatus>("get_ocr_worker_status");
 const getLatestStableText = callable<[], LatestStableText>("get_latest_stable_text");
 
-// Temporary Phase 2I.3.2 diagnostic controls (capture-conflict validation only).
-// Explicit user presses only: never started on mount/QAM open/polling, and never
-// stopped on QAM close. Uses the existing capture producer RPCs; no backend change.
-const startCaptureProducer = callable<[targetFps: number], CaptureProducerStatus>("capture_producer_start");
-const stopCaptureProducer = callable<[], CaptureProducerStatus>("capture_producer_stop");
-const getCaptureProducerStatus = callable<[], CaptureProducerStatus>("capture_producer_status");
-
 export function OCRDiagnosticSection() {
   const [status, setStatus] = useState<OCRWorkerStatus | undefined>();
   const [latest, setLatest] = useState<LatestStableText | undefined>();
   const [changeGate, setChangeGate] = useState<boolean>(DEFAULT_CHANGE_GATE);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [capture, setCapture] = useState<CaptureProducerStatus | undefined>();
-  const [captureBusy, setCaptureBusy] = useState(false);
-  const [captureError, setCaptureError] = useState("");
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -56,11 +39,9 @@ export function OCRDiagnosticSection() {
       try {
         const nextStatus = await getOcrWorkerStatus();
         const nextLatest = await getLatestStableText();
-        const nextCapture = await getCaptureProducerStatus();
         if (mounted.current) {
           setStatus(nextStatus);
           setLatest(nextLatest);
-          setCapture(nextCapture);
           setError("");
         }
       } catch (err) {
@@ -131,56 +112,6 @@ export function OCRDiagnosticSection() {
     }
   };
 
-  const captureState = describeCaptureState(capture);
-  const captureStartDisabled = isCaptureStartDisabled(captureState, captureBusy);
-  const captureStopDisabled = isCaptureStopDisabled(captureState, captureBusy);
-
-  const startCapture = async () => {
-    if (captureStartDisabled) {
-      return;
-    }
-    setCaptureBusy(true);
-    setCaptureError("");
-    try {
-      const result = await startCaptureProducer(CAPTURE_DIAGNOSTIC_FPS);
-      if (result && result.ok === false) {
-        setCaptureError(mapCaptureError(result.error, result.detail));
-      }
-      if (mounted.current) {
-        setCapture(result);
-      }
-    } catch (err) {
-      setCaptureError(mapCaptureError("start_failed", String(err)));
-    } finally {
-      if (mounted.current) {
-        setCaptureBusy(false);
-      }
-    }
-  };
-
-  const stopCapture = async () => {
-    if (captureStopDisabled) {
-      return;
-    }
-    setCaptureBusy(true);
-    setCaptureError("");
-    try {
-      const result = await stopCaptureProducer();
-      if (result && result.ok === false) {
-        setCaptureError(mapCaptureError(result.error, result.detail));
-      }
-      if (mounted.current) {
-        setCapture(result);
-      }
-    } catch (err) {
-      setCaptureError(mapCaptureError("stop_failed", String(err)));
-    } finally {
-      if (mounted.current) {
-        setCaptureBusy(false);
-      }
-    }
-  };
-
   const transport = status?.transport;
 
   return (
@@ -236,27 +167,6 @@ export function OCRDiagnosticSection() {
           </div>
         </div>
       </PanelSectionRow>
-      <PanelSection title="Capture Diagnostic (Temporary)">
-        <PanelSectionRow>
-          <div style={statusStyle}>
-            <div>Capture diagnostic state: {captureState}</div>
-            <div>{renderCaptureStatus(capture)}</div>
-            {capture?.last_error ? <div style={errorStyle}>{capture.last_error}</div> : null}
-            {captureError ? <div style={errorStyle}>{captureError}</div> : null}
-            <div style={hintStyle}>Temporary test control for OCR capture-conflict validation.</div>
-          </div>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <div style={rowActionsStyle}>
-            <ButtonItem layout="below" disabled={captureStartDisabled} onClick={startCapture}>
-              Start Capture Diagnostic
-            </ButtonItem>
-            <ButtonItem layout="below" disabled={captureStopDisabled} onClick={stopCapture}>
-              Stop Capture Diagnostic
-            </ButtonItem>
-          </div>
-        </PanelSectionRow>
-      </PanelSection>
     </PanelSection>
   );
 }
@@ -279,12 +189,6 @@ const statusStyle: CSSProperties = {
 const errorStyle: CSSProperties = {
   color: "#ffb4b4",
   overflowWrap: "anywhere",
-};
-
-const hintStyle: CSSProperties = {
-  color: "#cfcfcf",
-  fontSize: "11px",
-  lineHeight: 1.35,
 };
 
 const stableTextStyle: CSSProperties = {

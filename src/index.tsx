@@ -149,16 +149,9 @@ const roiConfigGet = callable<[appId: string | null], RecognitionROIResult>("roi
 const roiConfigSet = callable<[roi: RecognitionROI, appId: string | null], RecognitionROIResult>("roi_config_set");
 const roiConfigReset = callable<[appId: string | null], RecognitionROIResult>("roi_config_reset");
 
-// Phase 1C feature flags.
-// The persistent Gamescope external overlay renderer (backend) now owns caption
-// display, so the legacy React caption overlay and the notification keepalive
-// workaround are OFF by default. Region preview (QAM open only) stays enabled
-// because it is needed to position the OCR ROI.
-const ENABLE_LEGACY_SUBTITLE_OVERLAY = false;
-const ENABLE_NOTIFICATION_KEEPALIVE = false;
-// Debug probes must never render in a production/startup build.
-const ENABLE_DEBUG_PROBES = false;
-
+// The persistent Gamescope external overlay renderer (backend) owns caption
+// display. The frontend keeps only the QAM-open region preview needed to position
+// the OCR ROI.
 let globalSelectedBoxId: string | undefined;
 const selectionEvents = new EventTarget();
 
@@ -188,57 +181,6 @@ function useOverlayMounted() {
   return state;
 }
 
-type SubtitleColor = "white" | "black";
-let globalTextColor: SubtitleColor = "white";
-let globalFontSize = 24;
-let globalToastEnabled = false;
-const settingsEvents = new EventTarget();
-
-function setGlobalTextColor(color: SubtitleColor) {
-  globalTextColor = color;
-  settingsEvents.dispatchEvent(new Event("clarifydeck-settings"));
-}
-
-function setGlobalFontSize(size: number) {
-  globalFontSize = Math.max(12, Math.min(64, Math.round(size)));
-  settingsEvents.dispatchEvent(new Event("clarifydeck-settings"));
-}
-
-function setGlobalToastEnabled(enabled: boolean) {
-  globalToastEnabled = enabled;
-  settingsEvents.dispatchEvent(new Event("clarifydeck-settings"));
-}
-
-function useTextColor() {
-  const [color, setColor] = useState<SubtitleColor>(globalTextColor);
-  useEffect(() => {
-    const handler = () => setColor(globalTextColor);
-    settingsEvents.addEventListener("clarifydeck-settings", handler);
-    return () => settingsEvents.removeEventListener("clarifydeck-settings", handler);
-  }, []);
-  return color;
-}
-
-function useFontSize() {
-  const [size, setSize] = useState(globalFontSize);
-  useEffect(() => {
-    const handler = () => setSize(globalFontSize);
-    settingsEvents.addEventListener("clarifydeck-settings", handler);
-    return () => settingsEvents.removeEventListener("clarifydeck-settings", handler);
-  }, []);
-  return size;
-}
-
-function useToastEnabled() {
-  const [enabled, setEnabled] = useState(globalToastEnabled);
-  useEffect(() => {
-    const handler = () => setEnabled(globalToastEnabled);
-    settingsEvents.addEventListener("clarifydeck-settings", handler);
-    return () => settingsEvents.removeEventListener("clarifydeck-settings", handler);
-  }, []);
-  return enabled;
-}
-
 let globalOverlayViewport = { w: 0, h: 0 };
 const viewportEvents = new EventTarget();
 
@@ -255,43 +197,6 @@ function useOverlayViewport() {
     return () => viewportEvents.removeEventListener("clarifydeck-viewport", handler);
   }, []);
   return viewport;
-}
-
-function mountOverlayKeepAlive(): () => void {
-  let current: { dismiss: () => void } | null = null;
-  const ping = () => {
-    if (!globalToastEnabled) {
-      return;
-    }
-    try {
-      current?.dismiss();
-    } catch (error) {
-      console.warn("ClarifyDeck keep-alive dismiss failed", error);
-    }
-    try {
-      current = toaster.toast({
-        title: "ClarifyDeck",
-        body: " ",
-        showToast: false,
-        playSound: false,
-        showNewIndicator: false,
-        sound: 0,
-        duration: 12000,
-      });
-    } catch (error) {
-      console.warn("ClarifyDeck keep-alive toast failed", error);
-    }
-  };
-  const id = window.setInterval(ping, 10000);
-  ping();
-  return () => {
-    window.clearInterval(id);
-    try {
-      current?.dismiss();
-    } catch (error) {
-      console.warn("ClarifyDeck keep-alive cleanup failed", error);
-    }
-  };
 }
 
 type ReactRootLike = { render: (node: ReactNode) => void; unmount: () => void };
@@ -339,22 +244,12 @@ function mountOverlay(): () => void {
     container.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483647;";
     document.body.appendChild(container);
 
-    const rawProbe = document.createElement("div");
-    rawProbe.textContent = "CD raw";
-    rawProbe.style.cssText =
-      "position:fixed;top:60px;left:8px;z-index:2147483647;background:#00ff88;color:#000;" +
-      "padding:4px 8px;font:900 14px sans-serif;";
-    document.body.appendChild(rawProbe);
-
     const root = createRoot(container);
     root.render(<Overlay />);
     overlayMountMethod = "createRoot";
     const keepAlive = window.setInterval(() => {
       if (!container.isConnected) {
         document.body.appendChild(container);
-      }
-      if (!rawProbe.isConnected) {
-        document.body.appendChild(rawProbe);
       }
     }, 1000);
     return () => {
@@ -365,7 +260,6 @@ function mountOverlay(): () => void {
         console.warn("ClarifyDeck overlay unmount failed", error);
       }
       container.remove();
-      rawProbe.remove();
     };
   }
   overlayMountMethod = "routerHook";
@@ -463,9 +357,6 @@ function Content() {
   const sliderMaxHeight = status?.screen_height ?? 1200;
   const overlayState = useOverlayMounted();
   const overlayViewport = useOverlayViewport();
-  const textColor = useTextColor();
-  const fontSize = useFontSize();
-  const toastEnabled = useToastEnabled();
   const [roiDraft, setRoiDraft] = useState<RoiDraft>({ x: 8, y: 62, width: 84, height: 32 });
   const [roiSource, setRoiSource] = useState<string>("default");
   const [roiError, setRoiError] = useState<string>("");
@@ -848,44 +739,6 @@ function Content() {
         </PanelSectionRow>
       </PanelSection>
 
-      <PanelSection title="Subtitle color">
-        <PanelSectionRow>
-          <div style={rowActionsStyle}>
-            <ButtonItem layout="below" onClick={() => setGlobalTextColor("white")}>
-              {textColor === "white" ? "[x] White text" : "[ ] White text"}
-            </ButtonItem>
-            <ButtonItem layout="below" onClick={() => setGlobalTextColor("black")}>
-              {textColor === "black" ? "[x] Black text" : "[ ] Black text"}
-            </ButtonItem>
-          </div>
-        </PanelSectionRow>
-      </PanelSection>
-
-      <PanelSection title={`Subtitle size: ${fontSize}px`}>
-        <CoordinateSlider
-          label="Px"
-          min={12}
-          max={64}
-          value={fontSize}
-          onChange={(value) => setGlobalFontSize(value)}
-        />
-      </PanelSection>
-
-      <PanelSection title="In-game overlay">
-        <PanelSectionRow>
-          <ButtonItem layout="below" onClick={() => setGlobalToastEnabled(!toastEnabled)}>
-            {toastEnabled ? "[x] Keep overlay visible" : "[ ] Keep overlay visible"}
-          </ButtonItem>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <div style={hintStyle}>
-            The Steam UI layer is only composited over a game while a notification is
-            active. Enabling this keeps a silent background notification alive so the
-            overlay box stays on screen while playing.
-          </div>
-        </PanelSectionRow>
-      </PanelSection>
-
       <PanelSection title="Regions">
         {boxes.length === 0 ? (
           <PanelSectionRow>
@@ -969,8 +822,6 @@ function Overlay() {
   const { boxes } = useClarifyDeckState({ pollStatus: false });
   const selectedBoxId = useSelectedBoxId();
   const qamVisible = useQuickAccessVisible();
-  const textColor = useTextColor();
-  const fontSize = useFontSize();
   const capture = useCaptureScale();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [viewport, setViewport] = useState({ w: 1280, h: 800 });
@@ -995,18 +846,9 @@ function Overlay() {
 
   const sx = capture.w ? viewport.w / capture.w : 1;
   const sy = capture.h ? viewport.h / capture.h : 1;
-  const subtitleBackground =
-    textColor === "white" ? "rgba(0, 0, 0, 0.55)" : "rgba(255, 255, 255, 0.55)";
 
   return (
     <div ref={rootRef} style={overlayRootStyle}>
-      {ENABLE_DEBUG_PROBES ? (
-        <div style={overlayProbeStyle}>CD probe {boxes.length}</div>
-      ) : null}
-      {ENABLE_DEBUG_PROBES && qamVisible ? (
-        <div style={overlayBadgeStyle}>CD overlay: {boxes.length}</div>
-      ) : null}
-
       {qamVisible
         ? boxes.map((box, index) => {
             const selected = box.id === selectedBoxId || (!selectedBoxId && index === 0);
@@ -1031,28 +873,6 @@ function Overlay() {
               </div>
             );
           })
-        : null}
-
-      {ENABLE_LEGACY_SUBTITLE_OVERLAY
-        ? boxes
-            .filter((box) => box.text.trim().length > 0)
-            .map((box) => (
-              <div
-                key={`subtitle-${box.id}`}
-                style={{
-                  ...subtitleBoxStyle,
-                  background: subtitleBackground,
-                  color: textColor,
-                  fontSize,
-                  left: box.x * sx,
-                  top: box.y * sy,
-                  width: box.w * sx,
-                  height: box.h * sy,
-                }}
-              >
-                {box.text}
-              </div>
-            ))
         : null}
     </div>
   );
@@ -1119,29 +939,6 @@ const overlayRootStyle: CSSProperties = {
   zIndex: 2147483000,
 };
 
-const overlayBadgeStyle: CSSProperties = {
-  background: "rgba(255, 0, 128, 0.85)",
-  borderRadius: "4px",
-  color: "#ffffff",
-  fontSize: "12px",
-  left: 4,
-  padding: "2px 6px",
-  position: "absolute",
-  top: 4,
-};
-
-const overlayProbeStyle: CSSProperties = {
-  background: "#ff00aa",
-  border: "2px solid #ffffff",
-  color: "#ffffff",
-  fontSize: "14px",
-  fontWeight: 900,
-  left: 8,
-  padding: "4px 8px",
-  position: "absolute",
-  top: 8,
-};
-
 const regionBoxStyle: CSSProperties = {
   background: "rgba(0, 0, 0, 0.08)",
   borderRadius: "6px",
@@ -1171,33 +968,9 @@ const regionLabelStyle: CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-const subtitleBoxStyle: CSSProperties = {
-  backdropFilter: "blur(6px)",
-  background: "rgba(0, 0, 0, 0.55)",
-  border: "1px solid rgba(255, 255, 255, 0.22)",
-  borderRadius: "10px",
-  boxShadow: "0 10px 24px rgba(0, 0, 0, 0.35)",
-  boxSizing: "border-box",
-  color: "#ffffff",
-  display: "block",
-  fontSize: 24,
-  fontWeight: 700,
-  lineHeight: 1.25,
-  overscrollBehavior: "contain",
-  overflowY: "auto",
-  padding: "8px 12px",
-  pointerEvents: "auto",
-  position: "absolute",
-  textAlign: "center",
-  textShadow: "0 2px 4px rgba(0, 0, 0, 0.85)",
-  touchAction: "pan-y",
-  whiteSpace: "pre-wrap",
-};
-
 export default definePlugin(() => {
   console.log("ClarifyDeck initializing");
   const disposeOverlay = mountOverlay();
-  const disposeToast = ENABLE_NOTIFICATION_KEEPALIVE ? mountOverlayKeepAlive() : () => {};
 
   return {
     name: "ClarifyDeck",
@@ -1206,7 +979,6 @@ export default definePlugin(() => {
     icon: <FaSearchPlus />,
     onDismount() {
       disposeOverlay();
-      disposeToast();
       console.log("ClarifyDeck unloaded");
     },
   };

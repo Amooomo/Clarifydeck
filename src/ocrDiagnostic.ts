@@ -38,29 +38,13 @@ export type LatestStableText = {
   error?: string;
 };
 
-// Phase 2I.3.2 temporary capture-conflict diagnostic status.
-export type CaptureProducerStatus = {
-  ok?: boolean;
-  state?: string;
-  target_fps?: number | null;
-  frames_attempted?: number;
-  frames_succeeded?: number;
-  frames_failed?: number;
-  last_error?: string | null;
-  last_error_category?: string | null;
-  error?: string;
-  detail?: string;
-};
-
 export const DEFAULT_CHANGE_GATE = false;
 export const POLL_INTERVAL_MS = 1000;
 export const WORKER_STATES = ["STOPPED", "STARTING", "RUNNING", "FAILED", "STOPPING"] as const;
-// Temporary Phase 2I.3.2 capture diagnostic cadence: explicit 1 FPS only.
-export const CAPTURE_DIAGNOSTIC_FPS = 1.0;
 
 const ERROR_MESSAGES: Record<string, string> = {
   not_leader: "OCR worker can only be started by the backend leader.",
-  capture_conflict: "Stop the backend capture diagnostic before starting OCR.",
+  capture_conflict: "Stop the backend capture producer before starting OCR.",
   ocr_worker_unavailable: "OCR worker backend is unavailable.",
   model_missing: "OCR model files are missing.",
   forbidden_interpreter: "Unsafe Python interpreter was rejected.",
@@ -127,47 +111,4 @@ export function isStopDisabled(state: string, busy: boolean): boolean {
 export function isChangeGateToggleDisabled(state: string): boolean {
   // the toggle only affects the next explicit start; lock it while RUNNING
   return state === "RUNNING" || state === "STARTING";
-}
-
-// -- Phase 2I.3.2 temporary capture diagnostic helpers -----------------------
-
-export function describeCaptureState(status?: CaptureProducerStatus | null): string {
-  if (!status || !status.state) {
-    return "STOPPED";
-  }
-  return status.state;
-}
-
-export function isCaptureStartDisabled(state: string, busy: boolean): boolean {
-  return busy || state === "STARTING" || state === "RUNNING" || state === "STOPPING";
-}
-
-export function isCaptureStopDisabled(state: string, busy: boolean): boolean {
-  return busy || state === "STOPPED";
-}
-
-export function renderCaptureStatus(status?: CaptureProducerStatus | null): string {
-  const state = describeCaptureState(status);
-  const fps = typeof status?.target_fps === "number" ? `${status.target_fps} fps` : "fps -";
-  const succeeded = status?.frames_succeeded ?? 0;
-  const failed = status?.frames_failed ?? 0;
-  const base = `${state} | ${fps} | ok ${succeeded} | failed ${failed}`;
-  if (state === "FAILED" || status?.error) {
-    const detail = status?.last_error ?? status?.error ?? "capture producer error";
-    return `${base} | ${detail}`;
-  }
-  return base;
-}
-
-export function mapCaptureError(code?: string | null, detail?: string | null): string {
-  if (code === "producer_unavailable") {
-    return "Capture producer backend is unavailable.";
-  }
-  if (code === "not_leader") {
-    return "Capture producer can only run on the backend leader.";
-  }
-  if (!code) {
-    return detail ? `Capture error: ${detail}` : "Capture request failed.";
-  }
-  return detail ? `${code}: ${detail}` : `Capture error: ${code}`;
 }

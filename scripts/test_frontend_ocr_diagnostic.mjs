@@ -58,35 +58,13 @@ function effectBlock(source) {
   return source.slice(start, end);
 }
 
-function blockAfter(source, marker) {
-  const start = source.indexOf(marker);
-  if (start < 0) {
-    return "";
-  }
-  let depth = 0;
-  let opened = false;
-  for (let index = start; index < source.length; index += 1) {
-    const char = source[index];
-    if (char === "{") {
-      depth += 1;
-      opened = true;
-    } else if (char === "}") {
-      depth -= 1;
-      if (opened && depth === 0) {
-        return source.slice(start, index + 1);
-      }
-    }
-  }
-  return source.slice(start);
-}
-
 // -- pure logic --------------------------------------------------------------
 
 check("error: not_leader", () =>
   assert.equal(logic.mapOcrWorkerError("not_leader"), "OCR worker can only be started by the backend leader."),
 );
 check("error: capture_conflict", () =>
-  assert.equal(logic.mapOcrWorkerError("capture_conflict"), "Stop the backend capture diagnostic before starting OCR."),
+  assert.equal(logic.mapOcrWorkerError("capture_conflict"), "Stop the backend capture producer before starting OCR."),
 );
 check("error: model_missing", () => assert.equal(logic.mapOcrWorkerError("model_missing"), "OCR model files are missing."));
 check("error: forbidden_interpreter", () =>
@@ -174,98 +152,112 @@ check("component never spawns a process itself", () => {
   }
 });
 
-// -- Phase 2I.3.2 temporary capture diagnostic controls ----------------------
+// -- post-2I.3 cleanup C1: temporary capture diagnostic UI removed -----------
 
-check("capture: state helper defaults STOPPED", () =>
-  assert.equal(logic.describeCaptureState(undefined), "STOPPED"),
+check("cleanup: temporary capture section removed", () =>
+  assert.equal(componentSrc.includes("Capture Diagnostic (Temporary)"), false),
 );
-check("capture: RUNNING state renders", () => {
-  const rendered = logic.renderCaptureStatus({ state: "RUNNING", target_fps: 1.0, frames_succeeded: 3, frames_failed: 0 });
-  assert.ok(rendered.includes("RUNNING"));
-  assert.ok(rendered.includes("1 fps"));
+check("cleanup: capture RPC bindings removed", () => {
+  for (const needle of ["capture_producer_start", "capture_producer_stop", "capture_producer_status"]) {
+    assert.equal(componentSrc.includes(needle), false, `component still declares ${needle}`);
+  }
 });
-check("capture: STOPPED state renders", () => {
-  const rendered = logic.renderCaptureStatus({ state: "STOPPED", target_fps: null, frames_succeeded: 0, frames_failed: 0 });
-  assert.ok(rendered.includes("STOPPED"));
+check("cleanup: capture-only component helpers/state removed", () => {
+  for (const needle of [
+    "startCaptureProducer",
+    "stopCaptureProducer",
+    "getCaptureProducerStatus",
+    "captureBusy",
+    "CAPTURE_DIAGNOSTIC_FPS",
+  ]) {
+    assert.equal(componentSrc.includes(needle), false, `component still references ${needle}`);
+  }
 });
-check("capture: FAILED state renders concise diagnostic text", () => {
-  const rendered = logic.renderCaptureStatus({ state: "FAILED", last_error: "worker_exit code=1" });
-  assert.ok(rendered.includes("FAILED"));
-  assert.ok(rendered.includes("worker_exit code=1"));
+check("cleanup: capture helpers removed from pure logic", () => {
+  for (const needle of [
+    "describeCaptureState",
+    "isCaptureStartDisabled",
+    "isCaptureStopDisabled",
+    "renderCaptureStatus",
+    "mapCaptureError",
+    "CAPTURE_DIAGNOSTIC_FPS",
+  ]) {
+    assert.equal(typeof logic[needle], "undefined", `logic still exports ${needle}`);
+  }
 });
-check("capture: error status renders detail", () => {
-  const rendered = logic.renderCaptureStatus({ state: "STOPPED", error: "producer_unavailable" });
-  assert.ok(rendered.includes("producer_unavailable"));
-});
-check("capture: diagnostic cadence is 1 FPS", () => assert.equal(logic.CAPTURE_DIAGNOSTIC_FPS, 1.0));
-check("capture: duplicate start blocked while busy", () => {
-  assert.equal(logic.isCaptureStartDisabled("STOPPED", true), true);
-  assert.equal(logic.isCaptureStartDisabled("RUNNING", false), true);
-  assert.equal(logic.isCaptureStartDisabled("STOPPED", false), false);
-});
-check("capture: duplicate stop blocked while busy", () => {
-  assert.equal(logic.isCaptureStopDisabled("RUNNING", true), true);
-  assert.equal(logic.isCaptureStopDisabled("STOPPED", false), true);
-  assert.equal(logic.isCaptureStopDisabled("RUNNING", false), false);
-});
-check("capture: error mapping for unavailable producer", () =>
-  assert.equal(logic.mapCaptureError("producer_unavailable"), "Capture producer backend is unavailable."),
-);
-
-check("capture: RPC declared once each", () => {
-  assert.equal(countOccurrences(componentSrc, '"capture_producer_start"'), 1);
-  assert.equal(countOccurrences(componentSrc, '"capture_producer_stop"'), 1);
-  assert.equal(countOccurrences(componentSrc, '"capture_producer_status"'), 1);
-});
-check("capture: mount/effect does not start capture", () => {
+check("cleanup: polling still reads OCR worker status and latest text", () => {
   const body = effectBlock(componentSrc);
   assert.ok(body.length > 0, "useEffect block not found");
-  assert.equal(body.includes("startCaptureProducer"), false);
+  assert.ok(body.includes("getOcrWorkerStatus"));
+  assert.ok(body.includes("getLatestStableText"));
 });
-check("capture: unmount does not stop capture", () => {
+check("cleanup: polling clears its one interval", () => {
   const body = effectBlock(componentSrc);
-  assert.equal(body.includes("stopCaptureProducer"), false);
-});
-check("capture: polling calls only read-only capture status", () => {
-  const body = effectBlock(componentSrc);
-  assert.ok(body.includes("getCaptureProducerStatus"));
-  assert.equal(body.includes("startCaptureProducer"), false);
-  assert.equal(body.includes("stopCaptureProducer"), false);
   assert.ok(body.includes("clearInterval"));
 });
-check("capture: start RPC called exactly once with 1.0 fps", () => {
-  assert.equal(countOccurrences(componentSrc, "startCaptureProducer"), 2); // declaration + one call
-  assert.ok(componentSrc.includes("startCaptureProducer(CAPTURE_DIAGNOSTIC_FPS)"));
-});
-check("capture: stop RPC called exactly once", () => {
-  assert.equal(countOccurrences(componentSrc, "stopCaptureProducer"), 2); // declaration + one call
-  assert.ok(componentSrc.includes("stopCaptureProducer()"));
-});
-check("capture: explicit start handler guards duplicate presses", () => {
-  const handler = blockAfter(componentSrc, "const startCapture = async () => {");
-  assert.ok(handler.includes("captureStartDisabled"));
-  assert.ok(handler.includes("startCaptureProducer("));
-});
-check("capture: explicit stop handler guards duplicate presses", () => {
-  const handler = blockAfter(componentSrc, "const stopCapture = async () => {");
-  assert.ok(handler.includes("captureStopDisabled"));
-  assert.ok(handler.includes("stopCaptureProducer("));
-});
-check("capture: OCR start remains unchanged and issues backend request", () => {
-  assert.equal(countOccurrences(componentSrc, "startOcrWorker("), 1);
-  const handler = blockAfter(componentSrc, "const start = async () => {");
-  assert.equal(handler.includes("capture"), false, "OCR start handler must not be capture-gated");
-  assert.ok(handler.includes("startOcrWorker("));
-});
-check("capture: frontend does not synthesize capture_conflict", () => {
-  assert.equal(componentSrc.includes("capture_conflict"), false);
-  const handler = blockAfter(componentSrc, "const start = async () => {");
-  assert.ok(handler.includes("result.error"), "OCR start must surface backend error");
-});
-check("capture: no auto-start path in component", () => {
+check("cleanup: polling does not start or stop OCR", () => {
   const body = effectBlock(componentSrc);
-  assert.equal(body.includes("startCaptureProducer"), false);
-  assert.equal(componentSrc.includes("setInterval(startCapture"), false);
+  assert.equal(body.includes("startOcrWorker"), false);
+  assert.equal(body.includes("stopOcrWorker"), false);
+});
+check("cleanup: OCR Start remains one explicit backend request", () =>
+  assert.equal(countOccurrences(componentSrc, "startOcrWorker("), 1),
+);
+check("cleanup: OCR Stop remains one explicit backend request", () =>
+  assert.equal(countOccurrences(componentSrc, "stopOcrWorker("), 1),
+);
+check("cleanup: capture_conflict error mapping retained", () =>
+  assert.equal(logic.mapOcrWorkerError("capture_conflict"), "Stop the backend capture producer before starting OCR."),
+);
+check("cleanup: frontend does not synthesize capture_conflict", () =>
+  assert.equal(componentSrc.includes("capture_conflict"), false),
+);
+check("cleanup: no process spawn introduced", () => {
+  for (const needle of ["child_process", "exec(", "spawn(", "python3"]) {
+    assert.equal(componentSrc.includes(needle), false, `component contains ${needle}`);
+  }
+});
+
+// -- post-2I.3 cleanup C2: legacy frontend overlay/debug paths removed --------
+
+check("c2: hard-false legacy feature flags removed", () => {
+  for (const needle of ["ENABLE_LEGACY_SUBTITLE_OVERLAY", "ENABLE_NOTIFICATION_KEEPALIVE", "ENABLE_DEBUG_PROBES"]) {
+    assert.equal(indexSrc.includes(needle), false, `index still contains ${needle}`);
+  }
+});
+check("c2: no replacement feature flags introduced", () => {
+  assert.equal(indexSrc.includes("ENABLE_"), false);
+});
+check("c2: obsolete debug probes removed", () => {
+  for (const needle of ["CD raw", "CD probe", "CD overlay"]) {
+    assert.equal(indexSrc.includes(needle), false, `index still contains ${needle}`);
+  }
+});
+check("c2: legacy subtitle/keepalive controls removed", () => {
+  for (const needle of ["Subtitle color", "Subtitle size", "Keep overlay visible", "mountOverlayKeepAlive", "subtitleBoxStyle"]) {
+    assert.equal(indexSrc.includes(needle), false, `index still contains ${needle}`);
+  }
+});
+check("c2: legacy settings plumbing removed", () => {
+  for (const needle of ["globalTextColor", "globalFontSize", "globalToastEnabled", "settingsEvents", "useTextColor", "useFontSize", "useToastEnabled"]) {
+    assert.equal(indexSrc.includes(needle), false, `index still contains ${needle}`);
+  }
+});
+check("c2: OCR diagnostic section retained", () => assert.ok(indexSrc.includes("<OCRDiagnosticSection />")));
+check("c2: recognition ROI retained", () => {
+  for (const needle of ["Recognition Area", "roi_config_get", "roi_config_set", "roi_config_reset"]) {
+    assert.ok(indexSrc.includes(needle), `index missing ${needle}`);
+  }
+});
+check("c2: persistent backend overlay control retained", () => {
+  assert.ok(indexSrc.includes("Persistent Game Overlay (Experimental)"));
+  assert.equal(countOccurrences(indexSrc, "set_overlay_enabled"), 1);
+  assert.equal(countOccurrences(indexSrc, "setOverlayEnabled("), 1);
+});
+check("c2: QAM region preview retained", () => {
+  for (const needle of ["regionBoxStyle", "selectedRegionBoxStyle", "qamVisible"]) {
+    assert.ok(indexSrc.includes(needle), `index missing ${needle}`);
+  }
 });
 
 if (process.exitCode) {

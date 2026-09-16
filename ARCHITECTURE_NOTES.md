@@ -961,9 +961,9 @@ rendering, no translation, no frontend subtitle presentation.
 - **OCR Start is not frontend-blocked** by a RUNNING capture producer: the existing
   handler still issues the explicit request so the backend `capture_conflict` path
   stays testable; the mapped error is surfaced from the RPC result.
-- Marked in code/docs as a **temporary Phase 2I.3 diagnostic control**; it is not a
-  product feature and is slated for removal/consolidation in the planned
-  post-2I.3 cleanup (not deleted automatically after D5).
+- Marked in code/docs as a **temporary Phase 2I.3 diagnostic control**; it was not
+  a product feature and was removed in Post-2I.3 Cleanup C1 (kept through D5 and
+  the closure review).
 - Frontend harness extended (`scripts/test_frontend_ocr_diagnostic.mjs`, 55 checks).
 - **Device D5 PASS:** `CaptureProducer RUNNING → explicit Start OCR →` backend
   `capture_conflict` surfaced in QAM → OCR worker remains STOPPED with no
@@ -991,10 +991,61 @@ rendering, no translation, no frontend subtitle presentation.
   import isolation.
 - Local regression at closure: Python 646 tests / 0 failures / 3 platform skips;
   frontend harness 55 checks PASS; `pnpm build` PASS; import-safety OK.
-- The temporary Capture Diagnostic subsection (Phase 2I.3.2) is intentionally kept
-  until the dedicated cleanup phase. Cleanup candidates are recorded in the
-  separately reviewed cleanup phase; long-term safety regression tests are not
-  disposable.
+- The temporary Capture Diagnostic subsection (Phase 2I.3.2) was kept through the
+  closure review and removed in Post-2I.3 Cleanup C1. Cleanup candidates are
+  recorded in the separately reviewed cleanup phase; long-term safety regression
+  tests are not disposable.
+
+### Post-2I.3 Cleanup C1 — temporary capture diagnostic UI removal
+
+- Status: **PASS / CLOSED.**
+- Removed the temporary Phase 2I.3.2 QAM Capture Diagnostic UI after D5 device
+  PASS: the `Capture Diagnostic (Temporary)` panel, its Start/Stop buttons, and
+  capture status display.
+- Removed its frontend-only state/helpers/RPC bindings/tests
+  (`src/components/OCRDiagnostic.tsx`, `src/ocrDiagnostic.ts`,
+  `scripts/test_frontend_ocr_diagnostic.mjs`). The OCR Diagnostic poll loop again
+  reads only `get_ocr_worker_status()` and `get_latest_stable_text()`.
+- Backend CaptureProducer RPCs (`capture_producer_start/stop/status/reset`) and the
+  backend `capture_conflict` guard were intentionally retained; `main.py` and
+  `backend/*` are unchanged. OCR error mapping for `capture_conflict` remains
+  supported, with generic wording "Stop the backend capture producer before
+  starting OCR." (no longer referencing the removed diagnostic UI).
+- OCR Diagnostic remains explicit Start/Stop, Change Gate default **OFF**, one
+  1 Hz read-only poll cleared on unmount, backend source of truth.
+- No translation, persistent overlay, renderer, OCR scheduling, transport, ROI, or
+  backend lifecycle behavior changed.
+- Regression after C1: Python 646 tests / 0 failures / 3 platform skips; frontend
+  harness 47 checks PASS; `pnpm build` PASS; import-safety OK.
+
+### Post-2I.3 Cleanup C2 — legacy frontend overlay/debug path removal
+
+- Status: **PASS / CLOSED.**
+- Removed the unreachable hard-false legacy React subtitle rendering branch
+  (`ENABLE_LEGACY_SUBTITLE_OVERLAY`), including its subtitle JSX and
+  `subtitleBoxStyle`.
+- Removed the legacy **Subtitle color** / **Subtitle size** QAM controls and their
+  dead plumbing (`SubtitleColor`, `globalTextColor`, `globalFontSize`,
+  `settingsEvents`, `setGlobalTextColor`, `setGlobalFontSize`, `useTextColor`,
+  `useFontSize`), which only mutated the disabled React caption path.
+- Removed the disabled notification keepalive workaround
+  (`ENABLE_NOTIFICATION_KEEPALIVE`, `globalToastEnabled`, `setGlobalToastEnabled`,
+  `useToastEnabled`, `mountOverlayKeepAlive`, `disposeToast`) and its obsolete
+  **In-game overlay** / **Keep overlay visible** QAM control.
+- Removed obsolete frontend debug probes (`ENABLE_DEBUG_PROBES`, `overlayProbeStyle`,
+  `overlayBadgeStyle`, `CD probe` / `CD overlay`) and the historical raw DOM
+  `CD raw` probe injected by `mountOverlay()`; the real region-preview container's
+  re-append keepalive was preserved.
+- QAM-visible Recognition ROI/region preview retained (still `qamVisible`-gated,
+  geometry/scaling unchanged). Active backend **Persistent Game Overlay
+  (Experimental)** control/status (`set_overlay_enabled`) retained unchanged.
+- No backend `OverlayManager`/renderer, OCR, capture, ROI, worker, transport, or
+  lifecycle behavior changed. No translation or final-subtitle styling introduced.
+- The static guard in `scripts/test_overlay_safety.py` and the frontend harness
+  (`scripts/test_frontend_ocr_diagnostic.mjs`, now 56 checks) were updated to
+  assert the removed paths stay gone while the active paths remain.
+- Regression after C2: Python 646 tests / 0 failures / 3 platform skips; frontend
+  harness 56 checks PASS; `pnpm build` PASS; import-safety OK.
 
 ## Phase 2C.2 Wayland environment
 
@@ -1113,8 +1164,11 @@ Key properties:
   `DISPLAY` from `/proc/<pid>/environ`, then `/tmp/.X11-unix`, then `:0`.
 - Text rendering uses cairo (UTF-8/CJK via fontconfig `fc-match :lang=zh`) when
   available; otherwise an ASCII-only Xlib fallback.
-- Frontend flags: `ENABLE_LEGACY_SUBTITLE_OVERLAY=false`,
-  `ENABLE_NOTIFICATION_KEEPALIVE=false`. Region preview (QAM open) is retained.
+- Frontend (historical): the Phase 1C-era hard-false flags
+  `ENABLE_LEGACY_SUBTITLE_OVERLAY=false` / `ENABLE_NOTIFICATION_KEEPALIVE=false`
+  gated the disabled React caption overlay and notification keepalive; both paths
+  (and the flags) were removed in Post-2I.3 Cleanup C2. Region preview (QAM open)
+  is retained.
 - Cleanup: plugin `_unload`/`_uninstall` calls `OverlayManager.stop()` which
   sends `shutdown`, waits, then destroys the window and removes the socket.
 

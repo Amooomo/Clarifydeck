@@ -240,13 +240,22 @@ class OverlayManagerTest(unittest.TestCase):
 
 
 class FrontendBootSafetyTest(unittest.TestCase):
-    """Static checks: no debug probe, no auto-enable, no persisted state."""
+    """Static checks: no legacy/debug frontend overlay paths, no auto-enable."""
 
     def test_frontend_has_no_debug_probe_or_auto_enable(self) -> None:
         src = (ROOT / "src" / "index.tsx").read_text(encoding="utf-8")
-        self.assertIn("ENABLE_DEBUG_PROBES = false", src)
-        self.assertIn("ENABLE_LEGACY_SUBTITLE_OVERLAY = false", src)
-        self.assertIn("ENABLE_NOTIFICATION_KEEPALIVE = false", src)
+        # Post-2I.3 Cleanup C2: the hard-false legacy React subtitle, notification
+        # keepalive, and debug-probe paths were removed outright (not re-flagged).
+        for removed in (
+            "ENABLE_DEBUG_PROBES",
+            "ENABLE_LEGACY_SUBTITLE_OVERLAY",
+            "ENABLE_NOTIFICATION_KEEPALIVE",
+            "mountOverlayKeepAlive",
+            "CD raw",
+            "CD probe",
+            "CD overlay",
+        ):
+            self.assertNotIn(removed, src)
         self.assertNotIn("localStorage", src)
         # The only place the overlay is enabled is the explicit QAM toggle.
         self.assertEqual(src.count("setOverlayEnabled("), 1)
