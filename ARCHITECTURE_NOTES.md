@@ -1080,50 +1080,37 @@ rendering, no translation, no frontend subtitle presentation.
   queue cap1 newest-wins; `capture_conflict`; native import safety.
 - No translation or final persistent subtitle integration was started.
 
-## Phase 2J.1 — Translation Foundation
+## Product Direction Correction — Translation Removed
 
-Status: LOCAL PASS / DEVICE NOT APPLICABLE
+Status: PASS / CLOSED
 
-Purpose:
-- provider-agnostic translation domain contract
-- deterministic coordinator semantics
-- no production wiring / no real provider
+Phase 2J.1 translation foundation was technically validated but removed after
+product scope clarification.
 
-Contract:
-accepted StableTextEvent identity
--> TranslationCoordinator
--> injected TranslationProvider
--> TranslatedTextEvent
+ClarifyDeck is an accessibility/readability plugin, not a translation plugin.
 
-- `backend/translation.py` (pure stdlib; no `ocr.*` import) defines
-  `TranslationInput` (source identity: `worker_session_id`, `source_event_seq`,
-  `kind`, `text`, `confidence`, `source_seq`, `timestamp_monotonic`,
-  `source_language`, `target_language`), `TranslationResult`
-  (`translated_text`, `provider_name`, `detected_source_language`), and
-  `TranslatedTextEvent` (coordinator output with a session-local
-  `translation_event_seq`). A narrow input type is used instead of the canonical
-  `StableTextEvent` because that type carries no worker-session/event identity
-  (transport-level) and `backend` must not import `ocr.*`.
-- `TranslationProvider` is a minimal synchronous `Protocol`
-  (`name` + `translate(text, *, source_language, target_language)`); no network,
-  retries, rate limiting, credentials, or provider selection.
-- Frozen semantics:
-  - per-worker-session state (`begin_session` resets `translation_event_seq`,
-    latest event, committed/seen sequence); no cross-session carryover
-  - strictly increasing source event identity; duplicate/out-of-order/
-    session-mismatch inputs are rejected without calling the provider
-  - `clear` bypasses the provider and still emits a translated clear event
-  - provider failure preserves the last good translation, emits nothing, does not
-    advance the committed sequence, and records an error counter
-  - exact source/provider text is preserved (no strip/normalize/case-fold)
-  - no text-based deduplication (identity is `(worker_session_id,
-    source_event_seq)`)
-  - no auto retry; a failed event is `seen` but not `committed`, leaving room for
-    a future explicit retry API
-  - no network/provider SDK, no background thread/process
-  - no QAM/renderer wiring; no JSONL/RPC exposure
+Authoritative product flow:
 
-Phase 2J.1 does not change production runtime behavior.
+game base-plane capture
+-> Recognition ROI
+-> OCR / recognition
+-> stabilization
+-> StableTextEvent
+-> enlarged/reflowed persistent transparent overlay
+
+Translation is not part of the current product pipeline.
+
+The previously proposed Phase 2J.2 translation bridge is cancelled and must not
+be implemented.
+
+Historical note: Phase 2J.1 (commit `89beb38`) added `backend/translation.py` and
+`scripts/test_translation.py` but never wired them into production. Both files
+were deleted in a forward corrective commit after the product direction was
+clarified; Git history is preserved. Translation must not be reintroduced as
+product scope without an explicit product decision.
+
+No OCR, transport, worker, ROI, capture, renderer, or overlay behavior changed as
+part of this correction.
 
 ## Phase 2C.2 Wayland environment
 
