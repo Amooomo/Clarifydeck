@@ -1047,6 +1047,39 @@ rendering, no translation, no frontend subtitle presentation.
 - Regression after C2: Python 646 tests / 0 failures / 3 platform skips; frontend
   harness 56 checks PASS; `pnpm build` PASS; import-safety OK.
 
+### Post-2I.3 cleanup closure
+
+- **Status: PASS / CLOSED.**
+- Completed: C1 removed the temporary Phase 2I.3.2 Capture Diagnostic frontend
+  controls; C2 removed the unreachable legacy React subtitle / notification
+  keepalive / frontend debug-probe paths. The accepted C1+C2 work was checkpointed
+  locally at commit `055c27f` ("cleanup: close post-2i3 frontend diagnostics").
+- Retained intentionally (evidence-based probe audit):
+  - `scripts/roi_test.py` — imported by `test_roi_config_harness.py` and
+    `test_subtitle_band.py`; live/mock ROI + band diagnostics.
+  - `scripts/capture_producer_rpc_test.py` — loaded by `test_capture_producer_rpc.py`;
+    live-backend producer RPC harness.
+  - `scripts/gamescope_capture_test.py` — loaded by `test_capture.py`; bounded
+    one-shot Gamescope base-plane capture / probe isolation tool.
+  - `scripts/change_detection_test.py` — imported by `test_change_detector.py`;
+    `--live` real-Gamescope change-detection diagnostic.
+  - `scripts/capture_producer_test.py` — bounded live/mock producer diagnostic
+    (slow-consumer, `--no-consume`, device timing) not reproducible by unit tests.
+  - `scripts/capture_queue_test.py` — bounded live/mock latest-frame-queue
+    diagnostic (consumer delay, debug copy).
+  - `scripts/overlay_ipc_test.py` — manual renderer/IPC isolation (show/update/
+    UTF-8/multiline/hide/shutdown); retained for renderer troubleshooting and the
+    future persistent-subtitle work.
+- Deferred cleanup candidates (audited, not removed): `WORKER_STATES` in
+  `src/ocrDiagnostic.ts` is dead-proven (zero references); `eventIdentity` in
+  `src/ocrDiagnostic.ts` is test-only. Intentionally exposed diagnostic RPCs
+  (`capture_producer_reset`, `capture_test_base_plane`, `capture_frame_test`,
+  `capture_probe`) are retained as public interfaces, not dead.
+- Long-term regression contracts retained: no auto-start; exact-PID stop;
+  parent-death; no auto-restart; shared receiver/session reset; ROI precedence;
+  queue cap1 newest-wins; `capture_conflict`; native import safety.
+- No translation or final persistent subtitle integration was started.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so
