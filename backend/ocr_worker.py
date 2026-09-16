@@ -186,6 +186,9 @@ class OCRWorkerManager:
             str(fps),
             "--model-dir",
             str(resolved_model),
+            # Phase 2L.6: production worker always launches in multi-region mode;
+            # the primary-region v1 projection keeps legacy QAM/overlay compatible.
+            "--multi-region",
         ]
         if resolved_roi is not None:
             command += ["--roi-config", str(resolved_roi)]

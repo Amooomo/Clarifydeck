@@ -1522,6 +1522,36 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
 - backend launcher still does not enable multi-region by default; QAM/frontend/
   renderer unchanged; no new dependencies; diagnostics remain stderr-only.
 
+## Phase 2L.6 — Backend Production Launcher Activation
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+- `backend/ocr_worker.py::build_command` now always appends `--multi-region`, so
+  the normal QAM **Start OCR** path launches the multi-region worker
+  (`scripts/ocr_worker.py --multi-region`). `--change-gate` is still added only
+  when the user's Change Gate choice is ON. All prior argv
+  (`--parent-pid`, `--fps`, `--model-dir`, `--roi-config`) is unchanged.
+- legacy v1 `recognition_roi.json` needs no migration: it resolves to one
+  synthesized effective `RecognitionRegion`, emits a v2 event, and also emits the
+  primary-region v1 compatibility projection. No config rewrite occurs on start.
+- an existing v2 region config is consumed as-is; the first enabled effective
+  region is the compatibility primary. An explicit v2 config with zero enabled
+  regions runs with no region work and no stable events (no legacy fallback).
+- backend receiver (unchanged) now populates real v2 per-region state in
+  production while the legacy latest state follows only the primary v1 projection.
+  Secondary regions cannot overwrite legacy state.
+- Change Gate is per-region (2L.5) and is enabled through the existing QAM
+  choice; default remains OFF; forced-refresh interval unchanged.
+- QAM/overlay/frontend/renderer unchanged: current QAM stable text and the single
+  overlay block keep working through the primary v1 projection. Secondary regions
+  are not yet visible in QAM/overlay.
+- no OCR/renderer auto-start or auto-restart behavior changed; capture_conflict,
+  exact-PID ownership, parent-death, and single/fresh-session contracts unchanged.
+- v2 region RPC/editor and multi-block renderer remain deferred.
+- Known non-blocking: legacy aggregate `[ocr-scheduler]` counters can read zero in
+  multi-region mode while per-region scheduling works; diagnostics refactor
+  deferred.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

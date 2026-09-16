@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import signal
 import subprocess
 import sys
@@ -643,6 +644,56 @@ class ProductionLaunchPathTest(unittest.TestCase):
         roi_index = command.index("--roi-config")
         self.assertEqual(command[roi_index + 1], str(settings / "recognition_roi.json"))
         self.assertNotIn("None", command)
+        manager.stop()
+
+    # -- Phase 2L.6 production launcher activation -------------------------
+
+    def test_a1_default_argv_has_single_multi_region(self) -> None:
+        root = self._temp_root()
+        manager, calls, proc = self._manager(root, settings_root=root / "settings")
+        manager.start(fps=1.0, change_gate=False)
+        self.assertEqual(calls[0].count("--multi-region"), 1)
+        manager.stop()
+
+    def test_a2_change_gate_off_omits_change_gate(self) -> None:
+        root = self._temp_root()
+        manager, calls, proc = self._manager(root, settings_root=root / "settings")
+        manager.start(fps=1.0, change_gate=False)
+        self.assertIn("--multi-region", calls[0])
+        self.assertNotIn("--change-gate", calls[0])
+        manager.stop()
+
+    def test_a3_change_gate_on_includes_both(self) -> None:
+        root = self._temp_root()
+        manager, calls, proc = self._manager(root, settings_root=root / "settings")
+        manager.start(fps=1.0, change_gate=True)
+        self.assertEqual(calls[0].count("--multi-region"), 1)
+        self.assertEqual(calls[0].count("--change-gate"), 1)
+        manager.stop()
+
+    def test_a4_required_args_preserved(self) -> None:
+        root = self._temp_root()
+        settings = root / "settings"
+        manager, calls, proc = self._manager(root, settings_root=settings)
+        manager.start(fps=1.0, change_gate=False)
+        command = calls[0]
+        for flag in ("--parent-pid", "--fps", "--model-dir", "--roi-config", "--multi-region"):
+            self.assertEqual(command.count(flag), 1, flag)
+        self.assertEqual(command[command.index("--fps") + 1], "1.0")
+        self.assertEqual(command[command.index("--parent-pid") + 1], str(os.getpid()))
+        self.assertEqual(command[command.index("--model-dir") + 1], str(root / "models" / "ppocrv6"))
+        self.assertEqual(command[command.index("--roi-config") + 1], str(settings / "recognition_roi.json"))
+        manager.stop()
+
+    def test_a5_production_argv_parses_as_multi_region(self) -> None:
+        import scripts.ocr_worker as worker
+
+        root = self._temp_root()
+        manager, calls, proc = self._manager(root, settings_root=root / "settings")
+        manager.start(fps=1.0, change_gate=False)
+        parsed = worker._parse_args(calls[0][2:])  # drop python + script path
+        self.assertTrue(parsed.multi_region)
+        self.assertFalse(parsed.change_gate)
         manager.stop()
 
 

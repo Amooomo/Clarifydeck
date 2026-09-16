@@ -519,6 +519,29 @@ class BackendCompatibilityTest(unittest.TestCase):
         self.assertEqual(receiver.latest_stable_text_by_region("B")["text"], "B1")
         self.assertEqual(receiver.state().text, "A0")  # legacy only from primary v1 projection
 
+    def test_b7_representative_production_stream(self) -> None:
+        primary_text = StableTextEvent(kind="text", text="P", confidence=0.9, source_seq=1, timestamp_monotonic=1.0)
+        secondary_text = StableTextEvent(kind="text", text="S", confidence=0.9, source_seq=1, timestamp_monotonic=1.0)
+        primary_clear = StableTextEvent(kind="clear", text="", confidence=None, source_seq=None, timestamp_monotonic=2.0)
+        secondary_clear = StableTextEvent(kind="clear", text="", confidence=None, source_seq=None, timestamp_monotonic=2.0)
+        lines = [
+            t.encode_region_stable_text_event(1, mr.RegionStableTextEvent("P", primary_text)),
+            t.encode_envelope(t.envelope_from_event(2, primary_text)),
+            t.encode_region_stable_text_event(3, mr.RegionStableTextEvent("S", secondary_text)),
+            t.encode_region_stable_text_event(4, mr.RegionStableTextEvent("S", secondary_clear)),
+            t.encode_region_stable_text_event(5, mr.RegionStableTextEvent("P", primary_clear)),
+            t.encode_envelope(t.envelope_from_event(6, primary_clear)),
+        ]
+        receiver = OCRTransportReceiver(session_id="s1")
+        for line_json in lines:
+            self.assertTrue(receiver.handle_line(line_json))
+        status = receiver.status()
+        self.assertEqual(status["transport_messages_rejected"], 0)
+        self.assertEqual(status["transport_out_of_order"], 0)
+        self.assertEqual(receiver.latest_stable_text_by_region("P")["kind"], "clear")
+        self.assertEqual(receiver.latest_stable_text_by_region("S")["kind"], "clear")
+        self.assertEqual(receiver.state().kind, "clear")
+
 
 class OverlayCompatibilityTest(unittest.TestCase):
     def _receiver(self):
