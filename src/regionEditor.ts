@@ -176,3 +176,49 @@ export function regionLabel(region: RegionDraft, index: number, primaryId: strin
   const disabled = region.enabled ? "" : " (off)";
   return `${name}${primary}${disabled}`;
 }
+
+// -- Phase 2L.8 live preview --------------------------------------------------
+
+export type ScreenRect = { left: number; top: number; width: number; height: number };
+
+export function regionScreenRect(region: RegionDraft, viewportWidth: number, viewportHeight: number): ScreenRect {
+  return {
+    left: region.x * viewportWidth,
+    top: region.y * viewportHeight,
+    width: region.w * viewportWidth,
+    height: region.h * viewportHeight,
+  };
+}
+
+export function regionScreenRects(regions: RegionDraft[], viewportWidth: number, viewportHeight: number): ScreenRect[] {
+  return regions.map((region) => regionScreenRect(region, viewportWidth, viewportHeight));
+}
+
+export type RegionPreviewState = {
+  drafts: RegionDraft[];
+  selectedId: string | null;
+  primaryId: string | null;
+};
+
+const EMPTY_PREVIEW: RegionPreviewState = { drafts: [], selectedId: null, primaryId: null };
+let previewState: RegionPreviewState = EMPTY_PREVIEW;
+const previewEvents = new EventTarget();
+
+export function setRegionPreview(state: RegionPreviewState): void {
+  previewState = state;
+  previewEvents.dispatchEvent(new Event("region-preview"));
+}
+
+export function clearRegionPreview(): void {
+  previewState = EMPTY_PREVIEW;
+  previewEvents.dispatchEvent(new Event("region-preview"));
+}
+
+export function getRegionPreview(): RegionPreviewState {
+  return previewState;
+}
+
+export function subscribeRegionPreview(handler: () => void): () => void {
+  previewEvents.addEventListener("region-preview", handler);
+  return () => previewEvents.removeEventListener("region-preview", handler);
+}

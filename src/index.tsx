@@ -19,6 +19,13 @@ import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useStat
 import { FaSearchPlus } from "react-icons/fa";
 import { OCRDiagnosticSection } from "./components/OCRDiagnostic";
 import { RegionEditorSection } from "./components/RegionEditor";
+import {
+  getRegionPreview,
+  regionLabel,
+  regionScreenRect,
+  subscribeRegionPreview,
+  type RegionPreviewState,
+} from "./regionEditor";
 
 type BoxState = {
   id: string;
@@ -828,6 +835,9 @@ function Overlay() {
   const capture = useCaptureScale();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [viewport, setViewport] = useState({ w: 1280, h: 800 });
+  const [regionPreview, setRegionPreviewState] = useState<RegionPreviewState>(getRegionPreview());
+
+  useEffect(() => subscribeRegionPreview(() => setRegionPreviewState(getRegionPreview())), []);
 
   useEffect(() => {
     const measure = () => {
@@ -873,6 +883,30 @@ function Overlay() {
                 <div style={regionLabelStyle}>
                   X {box.x} | Y {box.y} | {box.w}x{box.h}
                 </div>
+              </div>
+            );
+          })
+        : null}
+
+      {qamVisible
+        ? regionPreview.drafts.map((region, index) => {
+            const rect = regionScreenRect(region, viewport.w, viewport.h);
+            const selected = region.region_id === regionPreview.selectedId;
+            return (
+              <div
+                key={`v2-region-${region.region_id}`}
+                style={{
+                  ...regionBoxStyle,
+                  ...(selected ? selectedRegionBoxStyle : {}),
+                  left: rect.left,
+                  top: rect.top,
+                  width: rect.width,
+                  height: rect.height,
+                  opacity: region.enabled ? 1 : 0.45,
+                  borderStyle: region.enabled ? "solid" : "dashed",
+                }}
+              >
+                <div style={regionLabelStyle}>{regionLabel(region, index, regionPreview.primaryId)}</div>
               </div>
             );
           })

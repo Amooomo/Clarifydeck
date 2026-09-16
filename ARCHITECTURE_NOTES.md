@@ -1588,6 +1588,34 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
   draws the legacy boxes, not v2 regions; legacy box/ROI frontend code retained as
   dead-but-compiling code for a later cleanup gate.
 
+## Phase 2L.8 — v2 Recognition Region Live Preview
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+- The existing QAM on-screen preview (`Overlay` in `src/index.tsx`, viewport
+  measured via `getBoundingClientRect`, gated by `useQuickAccessVisible`) now also
+  renders the v2 Recognition Region **draft** state. This is editor/preview only:
+  it is NOT the persistent OCR text renderer and does not route OCR text.
+- `src/regionEditor.ts` adds pure `regionScreenRect`/`regionScreenRects`
+  (normalized `x/y/w/h` -> `x*vw`, `y*vh`, `w*vw`, `h*vh`) and a module-level
+  preview store (`setRegionPreview`/`getRegionPreview`/`clearRegionPreview`/
+  `subscribeRegionPreview`, EventTarget-based).
+- `RegionEditor.tsx` publishes `{drafts, selectedId, primaryId}` to the store
+  whenever draft state changes, clears it on unmount, and reloads persisted config
+  from the backend when the QAM becomes visible (so unsaved drafts are not kept
+  across reopen).
+- all draft regions render simultaneously; the selected region (keyed by
+  `region_id`) gets the prominent outline; the first enabled draft is marked
+  `[Primary]`; disabled regions stay visible at reduced opacity with a dashed
+  outline and an `(off)` label. Labels use name or `Region N` (no raw UUIDs).
+- slider/edit/Add/Remove/Reorder update the preview immediately from draft state;
+  nothing is persisted until explicit Apply. No OCR restart or renderer lifecycle
+  is triggered.
+- base-plane capture isolation is unchanged (`gamescope_control
+  take_screenshot(base_plane_only)`); the preview is QAM UI only.
+- legacy `boxes` preview remains for the Advanced section (normally empty in
+  production); the production editor uses the v2 draft preview.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

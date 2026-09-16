@@ -368,6 +368,88 @@ check("index no longer presents legacy Regions as production editor", () => {
   assert.ok(indexSrc.includes("Legacy Regions (Advanced)"));
 });
 
+// -- Phase 2L.8 live v2 region preview ----------------------------------------
+
+check("preview: normalized geometry maps to screen rect", () => {
+  const rect = r.regionScreenRect(R({ x: 0.13, y: 0.74, w: 0.16, h: 0.06 }), 1280, 800);
+  assert.ok(Math.abs(rect.left - 166.4) < 0.001);
+  assert.ok(Math.abs(rect.top - 592) < 0.001);
+  assert.ok(Math.abs(rect.width - 204.8) < 0.001);
+  assert.ok(Math.abs(rect.height - 48) < 0.001);
+});
+check("preview: second sanity example", () => {
+  const rect = r.regionScreenRect(R({ x: 0.23, y: 0.8, w: 0.2, h: 0.12 }), 1280, 800);
+  assert.ok(Math.abs(rect.left - 294.4) < 0.001);
+  assert.ok(Math.abs(rect.top - 640) < 0.001);
+  assert.ok(Math.abs(rect.width - 256) < 0.001);
+  assert.ok(Math.abs(rect.height - 96) < 0.001);
+});
+check("preview: multiple regions render", () => {
+  const rects = r.regionScreenRects([R({ region_id: "a" }), R({ region_id: "b", x: 0.5 })], 1000, 500);
+  assert.equal(rects.length, 2);
+  assert.equal(rects[1].left, 500);
+});
+check("preview: store tracks drafts/selection/primary", () => {
+  const drafts = [R({ region_id: "a" }), R({ region_id: "b", enabled: false })];
+  r.setRegionPreview({ drafts, selectedId: "a", primaryId: r.primaryRegionId(drafts) });
+  const state = r.getRegionPreview();
+  assert.equal(state.drafts.length, 2);
+  assert.equal(state.selectedId, "a");
+  assert.equal(state.primaryId, "a");
+});
+check("preview: clear removes all drafts", () => {
+  r.setRegionPreview({ drafts: [R()], selectedId: "r1", primaryId: "r1" });
+  r.clearRegionPreview();
+  assert.deepEqual(r.getRegionPreview().drafts, []);
+});
+check("preview: geometry change reflects immediately", () => {
+  const moved = r.updateRegionGeometry([R({ region_id: "a", x: 0.1 })], "a", { x: 0.5 });
+  r.setRegionPreview({ drafts: moved, selectedId: "a", primaryId: "a" });
+  const rect = r.regionScreenRect(r.getRegionPreview().drafts[0], 1000, 500);
+  assert.equal(rect.left, 500);
+});
+check("preview: add produces a rect", () => {
+  const draft = r.newRegionDraft(0);
+  const rect = r.regionScreenRect(draft, 1000, 500);
+  assert.ok(rect.width > 0 && rect.height > 0);
+});
+check("preview: remove drops the rect", () => {
+  const rects = r.regionScreenRects(r.removeRegion([R({ region_id: "a" }), R({ region_id: "b" })], "a"), 1000, 500);
+  assert.equal(rects.length, 1);
+});
+check("preview: reorder changes primary without moving geometry", () => {
+  const regions = [R({ region_id: "a", x: 0.1 }), R({ region_id: "b", x: 0.5 })];
+  const moved = r.moveRegion(regions, "b", -1);
+  assert.equal(r.primaryRegionId(moved), "b");
+  assert.equal(moved[0].x, 0.5); // geometry unchanged, only order
+  assert.equal(moved[1].x, 0.1);
+});
+check("preview: disabled region labeled and not primary", () => {
+  const disabled = R({ region_id: "a", enabled: false, name: "Dialogue" });
+  assert.ok(r.regionLabel(disabled, 0, r.primaryRegionId([disabled])).includes("off"));
+  assert.equal(r.primaryRegionId([disabled]), null);
+});
+
+check("preview: store has no backend writes", () => {
+  const source = fs.readFileSync(REGION_LOGIC, "utf8");
+  assert.equal(/callable|region_config_set|fetch\(/.test(source), false);
+});
+check("preview: component syncs store and clears on unmount", () => {
+  assert.ok(regionComponentSrc.includes("setRegionPreview("));
+  assert.ok(regionComponentSrc.includes("clearRegionPreview("));
+});
+check("preview: only Apply calls region_config_set", () =>
+  assert.equal(countOccurrences(regionComponentSrc, "regionConfigSet("), 1),
+);
+check("preview: overlay renders v2 drafts from the store", () => {
+  assert.ok(indexSrc.includes("subscribeRegionPreview("));
+  assert.ok(indexSrc.includes("regionScreenRect("));
+  assert.ok(indexSrc.includes("regionPreview.drafts"));
+});
+check("preview: reloads persisted config when QAM opens", () =>
+  assert.ok(regionComponentSrc.includes("useQuickAccessVisible")),
+);
+
 if (process.exitCode) {
   console.error(`\nfrontend OCR diagnostic harness FAILED (${passed} passed)`);
 } else {

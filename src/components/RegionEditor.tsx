@@ -4,11 +4,12 @@
 // changes apply on the next explicit OCR start.
 
 import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
-import { callable } from "@decky/api";
+import { callable, useQuickAccessVisible } from "@decky/api";
 import { type CSSProperties, useEffect, useRef, useState } from "react";
 import {
   MAX_REGIONS,
   canAddRegion,
+  clearRegionPreview,
   describeSource,
   draftsForApply,
   moveRegion,
@@ -21,6 +22,7 @@ import {
   scopeOptions,
   setRegionEnabled,
   setRegionName,
+  setRegionPreview,
   updateRegionGeometry,
   validateRegions,
   type RegionConfigPayload,
@@ -42,6 +44,7 @@ export function RegionEditorSection() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const mounted = useRef(true);
+  const qamVisible = useQuickAccessVisible();
 
   const applyPayload = (result: RegionConfigPayload) => {
     setConfig(result);
@@ -80,6 +83,19 @@ export function RegionEditorSection() {
 
   const selected = drafts.find((region) => region.region_id === selectedId) ?? null;
   const primaryId = primaryRegionId(drafts);
+
+  // Live on-screen preview follows draft state (no persistence until Apply).
+  useEffect(() => {
+    setRegionPreview({ drafts, selectedId, primaryId });
+  }, [drafts, selectedId, primaryId]);
+
+  useEffect(() => () => clearRegionPreview(), []);
+
+  useEffect(() => {
+    if (qamVisible) {
+      void load();
+    }
+  }, [qamVisible]);
 
   const addRegion = () => {
     if (!canAddRegion(drafts)) {
