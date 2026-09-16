@@ -1,11 +1,5 @@
 
-import {
-  ButtonItem,
-  PanelSection,
-  PanelSectionRow,
-  findModule,
-  staticClasses,
-} from "@decky/ui";
+import { ButtonItem, PanelSection, PanelSectionRow, staticClasses } from "@decky/ui";
 import {
   addEventListener,
   callable,
@@ -15,7 +9,7 @@ import {
   toaster,
   useQuickAccessVisible,
 } from "@decky/api";
-import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { FaSearchPlus } from "react-icons/fa";
 import { OCRDiagnosticSection } from "./components/OCRDiagnostic";
 import { RegionEditorSection } from "./components/RegionEditor";
@@ -207,69 +201,12 @@ function useOverlayViewport() {
   return viewport;
 }
 
-type ReactRootLike = { render: (node: ReactNode) => void; unmount: () => void };
-type CreateRootFn = (element: Element) => ReactRootLike;
-
-function resolveCreateRoot(): CreateRootFn | undefined {
-  const reactDom = (
-    window as unknown as {
-      SP_REACTDOM?: {
-        createRoot?: CreateRootFn;
-        render?: (node: ReactNode, element: Element) => void;
-        unmountComponentAtNode?: (element: Element) => void;
-      };
-    }
-  ).SP_REACTDOM;
-  if (typeof reactDom?.createRoot === "function") {
-    return reactDom.createRoot.bind(reactDom) as CreateRootFn;
-  }
-  try {
-    const client = findModule(
-      (module: { createRoot?: unknown; hydrateRoot?: unknown }) =>
-        typeof module?.createRoot === "function" && typeof module?.hydrateRoot === "function",
-    ) as { createRoot?: CreateRootFn } | undefined;
-    if (typeof client?.createRoot === "function") {
-      console.log("ClarifyDeck using react-dom/client createRoot");
-      return client.createRoot.bind(client) as CreateRootFn;
-    }
-  } catch (error) {
-    console.warn("ClarifyDeck createRoot lookup failed", error);
-  }
-  if (reactDom?.render && reactDom?.unmountComponentAtNode) {
-    return (element: Element) => ({
-      render: (node: ReactNode) => reactDom.render?.(node, element),
-      unmount: () => reactDom.unmountComponentAtNode?.(element),
-    });
-  }
-  return undefined;
-}
-
+// Phase 2L.8.1: the region preview MUST live in the Steam UI app tree. Phase 1C
+// proved a plain DOM node appended to `document.body` is invisible over the game
+// even while the QAM is open; only `routerHook.addGlobalComponent` (the Steam UI
+// layer) is composited over the game while the QAM is active, which is exactly
+// the region-editing context. The body-mounted createRoot path was removed.
 function mountOverlay(): () => void {
-  const createRoot = resolveCreateRoot();
-  if (createRoot) {
-    const container = document.createElement("div");
-    container.id = "clarifydeck-overlay-root";
-    container.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483647;";
-    document.body.appendChild(container);
-
-    const root = createRoot(container);
-    root.render(<Overlay />);
-    overlayMountMethod = "createRoot";
-    const keepAlive = window.setInterval(() => {
-      if (!container.isConnected) {
-        document.body.appendChild(container);
-      }
-    }, 1000);
-    return () => {
-      window.clearInterval(keepAlive);
-      try {
-        root.unmount();
-      } catch (error) {
-        console.warn("ClarifyDeck overlay unmount failed", error);
-      }
-      container.remove();
-    };
-  }
   overlayMountMethod = "routerHook";
   routerHook.addGlobalComponent("ClarifyDeckOverlay", Overlay);
   return () => routerHook.removeGlobalComponent("ClarifyDeckOverlay");
@@ -838,6 +775,30 @@ function Overlay() {
   const [regionPreview, setRegionPreviewState] = useState<RegionPreviewState>(getRegionPreview());
 
   useEffect(() => subscribeRegionPreview(() => setRegionPreviewState(getRegionPreview())), []);
+
+  // Device-focused diagnostics: log the preview target viewport and computed
+  // pixel rects once per draft change (helps verify the on-screen mapping).
+  const previewSignature = regionPreview.drafts
+    .map((region) => `${region.region_id}:${region.x},${region.y},${region.w},${region.h},${region.enabled}`)
+    .join("|");
+  const lastPreviewSignature = useRef("");
+  useEffect(() => {
+    if (!qamVisible || regionPreview.drafts.length === 0 || previewSignature === lastPreviewSignature.current) {
+      return;
+    }
+    lastPreviewSignature.current = previewSignature;
+    console.log("[region-preview]", {
+      viewport: `${Math.round(viewport.w)}x${Math.round(viewport.h)}`,
+      rects: regionPreview.drafts.map((region) => {
+        const rect = regionScreenRect(region, viewport.w, viewport.h);
+        return {
+          id: region.region_id,
+          normalized: [region.x, region.y, region.w, region.h],
+          pixel: [Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height)],
+        };
+      }),
+    });
+  }, [previewSignature, qamVisible, viewport.w, viewport.h, regionPreview.drafts]);
 
   useEffect(() => {
     const measure = () => {

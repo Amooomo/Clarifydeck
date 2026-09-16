@@ -449,6 +449,32 @@ check("preview: overlay renders v2 drafts from the store", () => {
 check("preview: reloads persisted config when QAM opens", () =>
   assert.ok(regionComponentSrc.includes("useQuickAccessVisible")),
 );
+check("preview: rendered in Steam UI tree, not body-mounted", () => {
+  assert.ok(indexSrc.includes('routerHook.addGlobalComponent("ClarifyDeckOverlay"'));
+  assert.equal(indexSrc.includes("clarifydeck-overlay-root"), false);
+  assert.equal(indexSrc.includes("document.body.appendChild"), false);
+});
+check("preview: QAM close clears preview", () => {
+  assert.ok(regionComponentSrc.includes("clearRegionPreview"));
+  assert.ok(indexSrc.includes("qamVisible"));
+});
+check("name: production editor has no text input", () => {
+  assert.equal(regionComponentSrc.includes('type="text"'), false);
+  assert.equal(regionComponentSrc.includes("setRegionName"), false);
+});
+check("name: auto labels Region N", () => {
+  assert.equal(r.regionLabel(R({ region_id: "a", name: "Dialogue" }), 0, "a"), "Region 1 [Primary]");
+  assert.equal(r.regionLabel(R({ region_id: "b" }), 1, null), "Region 2");
+});
+check("name: disabled label", () =>
+  assert.equal(r.regionLabel(R({ region_id: "a", enabled: false }), 0, null), "Region 1 (off)"),
+);
+check("name: reorder renumbers by order, ids unchanged", () => {
+  const regions = [R({ region_id: "a" }), R({ region_id: "b" })];
+  const moved = r.moveRegion(regions, "b", -1);
+  assert.deepEqual(moved.map((x) => x.region_id), ["b", "a"]);
+  assert.equal(r.regionLabel(moved[0], 0, r.primaryRegionId(moved)), "Region 1 [Primary]");
+});
 
 if (process.exitCode) {
   console.error(`\nfrontend OCR diagnostic harness FAILED (${passed} passed)`);

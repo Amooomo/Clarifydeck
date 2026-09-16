@@ -1616,6 +1616,37 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
 - legacy `boxes` preview remains for the Advanced section (normally empty in
   production); the production editor uses the v2 draft preview.
 
+### Phase 2L.8.1 — Real Game-Surface Region Preview
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+- 2L.8 device failure root cause: `mountOverlay` preferred the
+  `createRoot`-into-`document.body` path. Phase 1C already proved a plain DOM node
+  appended to `document.body` is **invisible** over the game even while the QAM is
+  open (`CD raw` probe never appeared); only `routerHook.addGlobalComponent` (the
+  Steam UI app tree) is composited over the game while the Steam UI layer is
+  active (i.e. while the QAM is open). The React preview tree was therefore never
+  game-visible; the legacy box preview was not truly game-visible either.
+- fix: `mountOverlay` now always mounts the preview via
+  `routerHook.addGlobalComponent("ClarifyDeckOverlay", Overlay)`; the body-mounted
+  `createRoot` path (and its `findModule`/`ReactNode` helpers) was removed. This is
+  a frontend-only change; no Python/X11 renderer protocol change was needed.
+- the preview uses v2 editor **draft** state (module store), maps normalized
+  `x/y/w/h` to the measured game viewport (`x*vw`, `y*vh`, `w*vw`, `h*vh`), and
+  renders all drafts with selected/Primary/disabled distinctions. Slider/Add/
+  Remove/Reorder update it live with no persistence until Apply.
+- preview is gated by `useQuickAccessVisible` and cleared on editor unmount, so it
+  disappears when the QAM closes. It is independent of the persistent OCR text
+  overlay (the Python renderer) and does not require enabling it.
+- device diagnostics: when the draft preview changes while the QAM is visible, the
+  viewport and computed pixel rects are logged once (`[region-preview]`).
+- Region Name input removed from the production QAM editor (Steam Deck text entry
+  is impractical); labels are order-derived `Region 1/2/...` with `[Primary]` and
+  `(off)`. The optional backend `name` field is retained in persistence and
+  round-trips unchanged; `region_id` remains the identity.
+- capture isolation unchanged (`gamescope_control take_screenshot(base_plane_only)`);
+  the preview is QAM UI only and cannot enter OCR input.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

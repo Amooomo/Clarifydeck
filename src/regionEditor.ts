@@ -170,11 +170,13 @@ export function describeSource(source?: string | null): string {
   }
 }
 
+// Steam Deck QAM text entry is impractical, so labels are order-derived
+// (`Region N`); the optional persisted `name` field is retained but not shown.
 export function regionLabel(region: RegionDraft, index: number, primaryId: string | null): string {
-  const name = region.name && region.name.trim().length > 0 ? region.name.trim() : `Region ${index + 1}`;
+  const label = `Region ${index + 1}`;
   const primary = region.region_id === primaryId ? " [Primary]" : "";
   const disabled = region.enabled ? "" : " (off)";
-  return `${name}${primary}${disabled}`;
+  return `${label}${primary}${disabled}`;
 }
 
 // -- Phase 2L.8 live preview --------------------------------------------------

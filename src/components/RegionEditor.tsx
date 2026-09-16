@@ -21,7 +21,6 @@ import {
   scopeAppId,
   scopeOptions,
   setRegionEnabled,
-  setRegionName,
   setRegionPreview,
   updateRegionGeometry,
   validateRegions,
@@ -235,18 +234,6 @@ export function RegionEditorSection() {
               {selected.enabled ? "[x] Enabled" : "[ ] Enabled"}
             </ButtonItem>
           </PanelSectionRow>
-          <PanelSectionRow>
-            <input
-              aria-label="Region name"
-              onChange={(event) =>
-                setDrafts((current) => setRegionName(current, selected.region_id, event.currentTarget.value))
-              }
-              placeholder="Region name (optional)"
-              style={nameStyle}
-              type="text"
-              value={selected.name ?? ""}
-            />
-          </PanelSectionRow>
           <GeometrySlider
             label="X%"
             min={0}
@@ -365,15 +352,6 @@ const hintStyle: CSSProperties = {
   color: "#cfcfcf",
   fontSize: "11px",
   lineHeight: 1.35,
-};
-
-const nameStyle: CSSProperties = {
-  background: "rgba(0, 0, 0, 0.35)",
-  border: "1px solid rgba(255, 255, 255, 0.2)",
-  borderRadius: "6px",
-  color: "#f5f5f5",
-  padding: "6px 8px",
-  width: "100%",
 };
 
 const sliderLabelStyle: CSSProperties = {
