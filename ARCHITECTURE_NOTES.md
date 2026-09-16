@@ -1387,6 +1387,41 @@ input before OCR. The 2K.2.2 diagnostics are retained and remain OFF by default.
 Deferred (unchanged from 2K.2.2): Change Gate QAM toggle display resets after QAM
 reopen while OCR may still run with its start-time configuration.
 
+## Phase 2L.2 — Multi-Region OCR Execution Foundation
+
+Status: LOCAL PASS / DEVICE NOT APPLICABLE
+
+- `ocr/multi_region.py` (pure/lightweight; no numpy/cv2/rapidocr import) adds
+  `MultiRegionOCRCoordinator`, `RegionStableTextEvent`, and `region_pixel_rect`.
+- one frame decode -> many region crops: `process_frame` decodes once via
+  `decode_png_ex`, then crops each enabled region using the existing
+  `resolve_roi`/`crop_rgba` rules (no second geometry interpretation).
+- one OCR runtime reused sequentially: the injected `OCRRuntime` is called once
+  per enabled region, in collection order, with `sequence=frame.sequence` so all
+  region results share the authoritative source frame sequence. No threads, no
+  per-region runtime, no parallel OCR.
+- independent per-region stabilizers keyed by stable `region_id` (never index):
+  consensus/history/stale/clear state is fully isolated per region; no global
+  stabilizer.
+- lifecycle: removed region -> transient state discarded silently (no synthetic
+  clear); disabled region -> state discarded, no clear; re-enable -> fresh
+  stabilizer; geometry change -> only that region resets; reorder -> state
+  preserved (identity is `region_id`).
+- internal `RegionStableTextEvent(region_id, event)` wraps the canonical
+  `StableTextEvent`; emitted in deterministic region collection order. NOT
+  serialized to the v1 production JSONL transport.
+- production worker remains single-region (transitional primary ROI -> one OCR
+  stream -> v1 transport). Transport/receiver/QAM/renderer unchanged. No
+  false-positive heuristic added. Change-gated multi-region scheduling is
+  deferred (no per-region detectors in this phase).
+
+Deferred finding (NOT fixed here; for the next region-tagged transport gate): the
+stabilizer's `observe([])` clear event carries `source_seq=<frame seq>`, but the v1
+transport `decode_envelope` requires `source_seq is None` for `kind="clear"`, so
+that clear is rejected by the backend receiver. Only `tick`-emitted clears (which
+use `source_seq=None`) are accepted. This is a transport/stabilizer contract
+mismatch, outside 2L.2's frozen scope.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so
