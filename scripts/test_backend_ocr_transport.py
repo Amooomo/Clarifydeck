@@ -59,6 +59,19 @@ class ImportSafetyTest(unittest.TestCase):
         for module in ("numpy", "onnxruntime", "rapidocr", "cv2"):
             self.assertNotIn(f"import {module}", source)
 
+    def test_overlay_text_imports_no_native_overlay_deps(self) -> None:
+        prohibited = NATIVE_MODULES + ("cairo", "Xlib", "overlay.renderer", "overlay_manager")
+        code = (
+            "import sys; import backend.ocr_transport; import backend.overlay_text; "
+            f"bad=[m for m in {prohibited!r} if m in sys.modules]; "
+            "print('BAD' if bad else 'OK', bad)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code], cwd=str(ROOT), capture_output=True, text=True
+        )
+        self.assertIn("OK", result.stdout, msg=result.stdout + result.stderr)
+        self.assertNotIn("BAD", result.stdout)
+
 
 class ReceiverTest(unittest.TestCase):
     def test_first_event_accepted(self) -> None:
@@ -160,6 +173,97 @@ class EndToEndHarnessTest(unittest.TestCase):
         self.assertTrue(receiver.handle_line(encode_envelope(envelope_from_event(2, clear))))
         self.assertEqual(receiver.state().kind, "clear")
         self.assertEqual(receiver.state().text, "")
+
+
+class _RecordingObserver:
+    def __init__(self) -> None:
+        self.sessions: list = []
+        self.events: list = []
+        self.states_at_callback: list = []
+        self.receiver = None
+        self.fail_begin = False
+        self.fail_event = False
+
+    def begin_session(self, worker_session_id: str) -> None:
+        if self.fail_begin:
+            raise RuntimeError("begin boom")
+        self.sessions.append(worker_session_id)
+
+    def on_accepted_event(self, event) -> None:
+        if self.fail_event:
+            raise RuntimeError("event boom")
+        self.events.append(event)
+        if self.receiver is not None:
+            self.states_at_callback.append(self.receiver.state())
+
+
+class ObserverSeamTest(unittest.TestCase):
+    def test_k9_observer_notified_after_state_commit(self) -> None:
+        observer = _RecordingObserver()
+        receiver = OCRTransportReceiver(session_id="s1", observer=observer)
+        observer.receiver = receiver
+
+        self.assertTrue(receiver.handle_line(_text_line(1, text="committed")))
+
+        self.assertEqual(len(observer.events), 1)
+        self.assertEqual(observer.events[0].event_seq, 1)
+        self.assertEqual(observer.events[0].worker_session_id, "s1")
+        committed = observer.states_at_callback[0]
+        self.assertEqual(committed.last_event_seq, 1)
+        self.assertEqual(committed.text, "committed")
+
+    def test_k10_rejected_transport_events_never_reach_observer(self) -> None:
+        observer = _RecordingObserver()
+        receiver = OCRTransportReceiver(session_id="s1", observer=observer)
+
+        self.assertTrue(receiver.handle_line(_text_line(5, text="a")))
+        self.assertFalse(receiver.handle_line(_text_line(5, text="duplicate")))
+        self.assertFalse(receiver.handle_line(_text_line(2, text="stale")))
+
+        self.assertEqual(len(observer.events), 1)
+        self.assertEqual(receiver.status()["transport_out_of_order"], 2)
+
+    def test_k11_malformed_input_never_reaches_observer(self) -> None:
+        observer = _RecordingObserver()
+        receiver = OCRTransportReceiver(session_id="s1", observer=observer)
+
+        self.assertFalse(receiver.handle_line("{not json"))
+        self.assertFalse(receiver.handle_line(""))
+        self.assertEqual(len(observer.events), 0)
+
+    def test_k12_observer_exception_does_not_reject_ocr(self) -> None:
+        observer = _RecordingObserver()
+        observer.fail_event = True
+        receiver = OCRTransportReceiver(session_id="s1", observer=observer)
+
+        self.assertTrue(receiver.handle_line(_text_line(1, text="ok")))
+
+        self.assertEqual(receiver.state().text, "ok")
+        status = receiver.status()
+        self.assertEqual(status["observer_errors"], 1)
+        self.assertIn("on_accepted_event", status["last_observer_error"])
+        self.assertEqual(status["transport_messages_rejected"], 0)
+        self.assertEqual(status["transport_out_of_order"], 0)
+
+    def test_k13_begin_session_observer_exception_isolated(self) -> None:
+        observer = _RecordingObserver()
+        observer.fail_begin = True
+        receiver = OCRTransportReceiver(session_id="s1", observer=observer)
+
+        state = receiver.begin_session("s2")
+
+        self.assertEqual(state.worker_session_id, "s2")
+        self.assertEqual(receiver.state().worker_session_id, "s2")
+        self.assertEqual(receiver.status()["observer_errors"], 1)
+        self.assertTrue(receiver.handle_line(_text_line(1, text="after")))
+
+    def test_k14_default_receiver_without_observer(self) -> None:
+        receiver = OCRTransportReceiver(session_id="s1")
+        self.assertTrue(receiver.handle_line(_text_line(1, text="x")))
+        status = receiver.status()
+        self.assertEqual(status["observer_errors"], 0)
+        self.assertIsNone(status["last_observer_error"])
+        self.assertEqual(status["last_text"], "x")
 
 
 class DiagnosticFlagTest(unittest.TestCase):

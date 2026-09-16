@@ -1112,6 +1112,56 @@ product scope without an explicit product decision.
 No OCR, transport, worker, ROI, capture, renderer, or overlay behavior changed as
 part of this correction.
 
+## Phase 2K.1 — Accepted StableTextEvent → Overlay Action Foundation
+
+Status: LOCAL PASS / DEVICE NOT APPLICABLE
+
+Product flow:
+game base-plane capture
+-> Recognition ROI
+-> OCR
+-> stabilization
+-> accepted transport event
+-> OverlayTextCoordinator
+-> OverlayTextAction
+-> [future main-loop delivery]
+-> persistent renderer
+
+- `backend/ocr_transport.py` gains `AcceptedStableTextEvent` (immutable view built
+  only after decode/schema/order validation; exact text preserved) and one
+  optional synchronous `OCRTransportObserver` (`begin_session` +
+  `on_accepted_event`). `observer=None` is the production default. The receiver
+  commits authoritative state/counters BEFORE notifying the observer, so
+  downstream overlay problems can never invalidate OCR acceptance. Rejected
+  (malformed/invalid/oversized/duplicate/out-of-order) events never notify the
+  observer. Observer exceptions are isolated into separate diagnostics
+  (`observer_errors`, `last_observer_error`) and do not change
+  `transport_messages_rejected` / `transport_out_of_order` or the committed state.
+- `backend/overlay_text.py` (pure stdlib; consumes the transport seam; never
+  imported by `backend.ocr_transport`) defines `OverlayTextAction`
+  (`action_seq`, `kind` text|hide, session/event identity, exact `text`,
+  confidence/source_seq/timestamp; no styling/geometry fields),
+  `OverlayTextCoordinator`, and a thin `OverlayTextTransportObserver` adapter.
+- Frozen:
+  - only accepted transport events can drive overlay actions
+  - `worker_session_id` + `event_seq` define source identity (`source_seq` is
+    metadata only)
+  - text maps to an exact text action; `clear` maps to `hide`
+  - no string-based dedupe (identical text on distinct events stays distinct)
+  - session reset is explicit via `begin_session` and emits no hide action
+    (renderer hide-on-restart is deferred to the production delivery gate)
+  - observer failures cannot invalidate OCR acceptance
+  - production observer remains disabled (`OCRTransportReceiver(observer=None)`)
+  - no renderer/OverlayManager calls, no asyncio, no threads/sockets in this phase
+- Thread boundary (explicitly deferred): `OCRTransportReceiver.handle_line` runs
+  on the `ocr-worker-stdout` thread while `OverlayManager.update/hide` are async.
+  Phase 2K.1 intentionally adds NO unsafe shortcut (`asyncio.run`,
+  `new_event_loop`, `run_until_complete`, awaiting from the reader thread, or
+  renderer access from that thread). The safe main-asyncio-loop handoff is the
+  next gate.
+
+Translation remains out of scope.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

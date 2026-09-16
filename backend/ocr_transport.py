@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Protocol
 
 from ocr.transport import TransportError, decode_envelope
 
@@ -32,6 +32,39 @@ class StableOCRState:
     timestamp_monotonic: Optional[float] = None
 
 
+@dataclass(frozen=True)
+class AcceptedStableTextEvent:
+    """Immutable view of an already-accepted transport event.
+
+    Constructed only after decode/schema/order validation succeeds, so consumers
+    never see malformed or rejected input. Exact text is preserved (no
+    normalization). Pure backend transport view: no ocr.stabilizer or overlay
+    dependency.
+    """
+
+    worker_session_id: str
+    event_seq: int
+    kind: str  # "text" | "clear"
+    text: str
+    confidence: Optional[float]
+    source_seq: Optional[int]
+    timestamp_monotonic: Optional[float]
+
+
+class OCRTransportObserver(Protocol):
+    """Optional synchronous post-accept observer.
+
+    Called on the OCR stdout reader thread. Implementations must be synchronous
+    and must not block or perform cross-thread async handoff.
+    """
+
+    def begin_session(self, worker_session_id: str) -> None:
+        ...
+
+    def on_accepted_event(self, event: AcceptedStableTextEvent) -> None:
+        ...
+
+
 @dataclass
 class OCRTransportStats:
     transport_messages_received: int = 0
@@ -40,13 +73,20 @@ class OCRTransportStats:
     transport_text_events: int = 0
     transport_clear_events: int = 0
     last_transport_error: Optional[str] = None
+    observer_errors: int = 0
+    last_observer_error: Optional[str] = None
 
 
 class OCRTransportReceiver:
-    def __init__(self, session_id: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        session_id: Optional[str] = None,
+        observer: Optional[OCRTransportObserver] = None,
+    ) -> None:
         self._session_id = session_id or uuid.uuid4().hex
         self._state = StableOCRState(worker_session_id=self._session_id)
         self._stats = OCRTransportStats()
+        self._observer = observer
 
     def begin_session(self, session_id: Optional[str] = None) -> StableOCRState:
         """Start a new worker session: reset the event_seq boundary and counters.
@@ -54,10 +94,14 @@ class OCRTransportReceiver:
         The receiver object may be reused across real worker starts (Phase 2I.3.1),
         so a fresh logical session must explicitly reset both the stable state and
         the transport counters rather than relying on a newly allocated receiver.
+
+        The optional observer is notified only AFTER the authoritative reset, and
+        observer failures are isolated so they cannot affect OCR worker startup.
         """
         self._session_id = session_id or uuid.uuid4().hex
         self._state = StableOCRState(worker_session_id=self._session_id)
         self._stats = OCRTransportStats()
+        self._notify_begin_session(self._session_id)
         return self._state
 
     def handle_line(self, line: str) -> bool:
@@ -89,7 +133,42 @@ class OCRTransportReceiver:
             timestamp_monotonic=envelope.timestamp_monotonic,
         )
         self._stats.last_transport_error = None
+        # State is committed before notifying the observer so downstream overlay
+        # problems can never invalidate OCR correctness.
+        self._notify_accepted_event(
+            AcceptedStableTextEvent(
+                worker_session_id=self._session_id,
+                event_seq=envelope.event_seq,
+                kind=envelope.kind,
+                text=envelope.text,
+                confidence=envelope.confidence,
+                source_seq=envelope.source_seq,
+                timestamp_monotonic=envelope.timestamp_monotonic,
+            )
+        )
         return True
+
+    # -- observer seam -----------------------------------------------------
+
+    def _notify_begin_session(self, session_id: str) -> None:
+        observer = self._observer
+        if observer is None:
+            return
+        try:
+            observer.begin_session(session_id)
+        except Exception as exc:
+            self._stats.observer_errors += 1
+            self._stats.last_observer_error = f"begin_session:{type(exc).__name__}"
+
+    def _notify_accepted_event(self, event: AcceptedStableTextEvent) -> None:
+        observer = self._observer
+        if observer is None:
+            return
+        try:
+            observer.on_accepted_event(event)
+        except Exception as exc:
+            self._stats.observer_errors += 1
+            self._stats.last_observer_error = f"on_accepted_event:{type(exc).__name__}"
 
     def state(self) -> StableOCRState:
         return self._state
@@ -129,4 +208,6 @@ class OCRTransportReceiver:
             "transport_text_events": self._stats.transport_text_events,
             "transport_clear_events": self._stats.transport_clear_events,
             "last_transport_error": self._stats.last_transport_error,
+            "observer_errors": self._stats.observer_errors,
+            "last_observer_error": self._stats.last_observer_error,
         }
