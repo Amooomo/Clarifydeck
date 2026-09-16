@@ -278,6 +278,94 @@ class ManagerPreviewTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_r1_r2_two_region_text_blocks_independent(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            await manager.set_region_text("A", (0.1, 0.1, 0.2, 0.2), "a")
+            await manager.set_region_text("B", (0.5, 0.5, 0.2, 0.2), "b")
+            self.assertEqual(manager.status()["region_text_count"], 2)
+            await manager.set_region_text("A", (0.1, 0.1, 0.2, 0.2), "a2")
+            self.assertEqual(manager._region_text["A"]["text"], "a2")
+            self.assertEqual(manager._region_text["B"]["text"], "b")
+
+        asyncio.run(run())
+
+    def test_r3_hide_a_leaves_b(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            await manager.set_region_text("A", (0.1, 0.1, 0.2, 0.2), "a")
+            await manager.set_region_text("B", (0.5, 0.5, 0.2, 0.2), "b")
+            await manager.hide_region_text("A")
+            self.assertEqual(manager.status()["region_text_count"], 1)
+            self.assertEqual(manager._region_text["B"]["text"], "b")
+
+        asyncio.run(run())
+
+    def test_r4_clear_all_text_keeps_preview(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            await manager.set_region_preview_enabled(True)
+            await manager.set_region_preview([{"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}])
+            await manager.set_region_text("A", (0.1, 0.1, 0.2, 0.2), "a")
+            await manager.clear_all_region_text()
+            self.assertEqual(manager.status()["region_text_count"], 0)
+            self.assertEqual(manager.status()["preview_region_count"], 1)
+
+        asyncio.run(run())
+
+    def test_r5_clear_preview_keeps_text(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            await manager.set_region_preview_enabled(True)
+            await manager.set_region_preview([{"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}])
+            await manager.set_region_text("A", (0.1, 0.1, 0.2, 0.2), "a")
+            await manager.clear_region_preview()
+            self.assertEqual(manager.status()["preview_region_count"], 0)
+            self.assertEqual(manager.status()["region_text_count"], 1)
+
+        asyncio.run(run())
+
+    def test_l4_text_off_clears_blocks_keeps_preview(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            await manager.set_region_preview_enabled(True)
+            await manager.set_region_preview([{"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}])
+            await manager.set_region_text("A", (0.1, 0.1, 0.2, 0.2), "a")
+            result = await manager.disable()
+            self.assertEqual(result["state"], "RUNNING")
+            self.assertEqual(result["region_text_count"], 0)
+            self.assertEqual(result["preview_region_count"], 1)
+            self.assertTrue(result["preview_enabled"])
+
+        asyncio.run(run())
+
+    def test_l5_preview_off_keeps_text(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            await manager.set_region_preview_enabled(True)
+            await manager.set_region_text("A", (0.1, 0.1, 0.2, 0.2), "a")
+            result = await manager.set_region_preview_enabled(False)
+            self.assertEqual(result["state"], "RUNNING")
+            self.assertEqual(result["preview_region_count"], 0)
+            self.assertEqual(result["region_text_count"], 1)
+
+        asyncio.run(run())
+
+    def test_region_text_command_sent(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            await manager.set_region_text("A", (0.1, 0.1, 0.2, 0.2), "a")
+            self.assertIn("set_region_text", manager._sock.types())
+
+        asyncio.run(run())
+
     def test_stop_tears_down_regardless_of_preview(self) -> None:
         async def run():
             manager = self.om.OverlayManager()

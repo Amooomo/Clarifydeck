@@ -19,6 +19,7 @@ import argparse
 import ctypes
 import ctypes.util
 import errno
+import math
 import os
 import selectors
 import signal
@@ -251,6 +252,12 @@ def _bind_cairo() -> None:
     libcairo.cairo_set_line_width.restype = None
     libcairo.cairo_set_dash.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double), ctypes.c_int, ctypes.c_double]
     libcairo.cairo_set_dash.restype = None
+    libcairo.cairo_save.argtypes = [ctypes.c_void_p]
+    libcairo.cairo_save.restype = None
+    libcairo.cairo_restore.argtypes = [ctypes.c_void_p]
+    libcairo.cairo_restore.restype = None
+    libcairo.cairo_clip.argtypes = [ctypes.c_void_p]
+    libcairo.cairo_clip.restype = None
 
 
 def resolve_cjk_font() -> str:
@@ -288,6 +295,8 @@ class OverlayRenderer:
         self.visible = False
         self.text = ""
         self.preview_regions: list = []
+        # region_id -> {"rect": {"x","y","w","h"}, "text": str}
+        self.region_text: dict = {}
 
     def log(self, message: str) -> None:
         sys.stderr.write(f"[renderer] {message}\n")
@@ -362,6 +371,8 @@ class OverlayRenderer:
         libcairo.cairo_set_operator(self.cairo, 2)  # OVER
         if self.visible and self.text:
             self._draw_text_cairo()
+        if self.region_text:
+            self._draw_region_text_cairo()
         if self.preview_regions:
             self._draw_preview_cairo()
         libcairo.cairo_surface_flush(self.cairo_surface)
@@ -392,6 +403,61 @@ class OverlayRenderer:
             ty = box_y + padding + self.font_size + index * line_h
             libcairo.cairo_move_to(self.cairo, tx, ty)
             libcairo.cairo_show_text(self.cairo, line.encode("utf-8"))
+
+    def _measure_cairo(self, candidate: str) -> float:
+        ext = cairo_text_extents_t()
+        libcairo.cairo_text_extents(self.cairo, candidate.encode("utf-8"), ctypes.byref(ext))
+        return ext.x_advance
+
+    def _draw_region_text_cairo(self) -> None:
+        font_size = 20.0
+        line_h = font_size * 1.3
+        padding = 8.0
+        libcairo.cairo_select_font_face(self.cairo, self.font_family.encode(), 0, 0)
+        libcairo.cairo_set_font_size(self.cairo, font_size)
+        for block in self.region_text.values():
+            rect = block["rect"]
+            left = rect["x"] * self.width
+            top = rect["y"] * self.height
+            width = rect["w"] * self.width
+            height = rect["h"] * self.height
+            text = block["text"]
+            if width <= 2 * padding or height <= 2 * padding or not text:
+                continue
+            libcairo.cairo_save(self.cairo)
+            libcairo.cairo_rectangle(self.cairo, left, top, width, height)
+            libcairo.cairo_clip(self.cairo)
+            libcairo.cairo_set_source_rgba(self.cairo, 1.0, 1.0, 1.0, 1.0)
+            lines = protocol.wrap_text(text, width - 2 * padding, self._measure_cairo)
+            lines = protocol.clip_lines(lines, line_h, height - 2 * padding)
+            baseline = top + padding + font_size
+            for line in lines:
+                libcairo.cairo_move_to(self.cairo, left + padding, baseline)
+                libcairo.cairo_show_text(self.cairo, line.encode("utf-8"))
+                baseline += line_h
+            libcairo.cairo_restore(self.cairo)
+
+    def _draw_region_text_xlib(self) -> None:
+        font_size = 20
+        line_h = font_size + 6
+        padding = 8
+        for block in self.region_text.values():
+            rect = block["rect"]
+            left = int(rect["x"] * self.width)
+            top = int(rect["y"] * self.height)
+            width = int(rect["w"] * self.width)
+            height = int(rect["h"] * self.height)
+            text = block["text"]
+            if width <= 2 * padding or height <= 2 * padding or not text:
+                continue
+            lines = protocol.wrap_text(text, max(1, width - 2 * padding), lambda candidate: len(candidate) * 14)
+            lines = protocol.clip_lines(lines, line_h, height - 2 * padding)
+            libX11.XSetForeground(self.dpy, self.gc, 0xFFFFFFFF)
+            baseline = top + padding + font_size
+            for line in lines:
+                data = line.encode("utf-8", errors="replace")
+                libX11.XDrawString(self.dpy, self.win, self.gc, left + padding, baseline, data, len(data))
+                baseline += line_h
 
     def _draw_preview_cairo(self) -> None:
         for region in self.preview_regions:
@@ -427,6 +493,8 @@ class OverlayRenderer:
         libX11.XFillRectangle(self.dpy, self.win, self.gc, 0, 0, self.width, self.height)
         if self.visible and self.text:
             self._draw_text_xlib()
+        if self.region_text:
+            self._draw_region_text_xlib()
         if self.preview_regions:
             self._draw_preview_xlib()
 
@@ -678,6 +746,21 @@ def serve(renderer: OverlayRenderer, sock_path: Path, parent_pid: int = 0) -> in
                         continue
                     if action == "clear_region_preview":
                         renderer.preview_regions = []
+                        renderer.draw()
+                        continue
+                    if action == "set_region_text":
+                        region_id = payload.get("region_id")
+                        block = protocol.sanitize_region_text(region_id, payload.get("rect"), payload.get("text", ""))
+                        if block is not None:
+                            renderer.region_text[str(region_id)] = block
+                            renderer.draw()
+                        continue
+                    if action == "hide_region_text":
+                        renderer.region_text.pop(str(payload.get("region_id", "")), None)
+                        renderer.draw()
+                        continue
+                    if action == "clear_all_region_text":
+                        renderer.region_text = {}
                         renderer.draw()
                         continue
     finally:

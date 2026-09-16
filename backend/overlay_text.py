@@ -34,6 +34,7 @@ class OverlayTextAction:
     confidence: Optional[float] = None
     source_seq: Optional[int] = None
     timestamp_monotonic: Optional[float] = None
+    region_id: Optional[str] = None  # v2 region identity; None for legacy v1
 
 
 @dataclass
@@ -153,6 +154,7 @@ class OverlayTextCoordinator:
             confidence=event.confidence,
             source_seq=event.source_seq,
             timestamp_monotonic=event.timestamp_monotonic,
+            region_id=getattr(event, "region_id", None),
         )
         self._latest = action
         return action

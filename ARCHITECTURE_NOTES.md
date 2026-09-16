@@ -1682,6 +1682,40 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
   (`take_screenshot(base_plane_only)`) is unchanged and excludes the overlay.
 - Region Name input remains removed; automatic `Region N` labels remain.
 
+## Phase 2M.1 — Per-Region Persistent OCR Text Blocks
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+- v2 region events are now the authoritative persistent-overlay input. Each
+  accepted v2 event drives one text block keyed by `worker_session_id + region_id`
+  (never index/label). The paired primary v1 compatibility projection still
+  updates backend legacy/QAM state but is ignored by the overlay (no duplicate
+  primary block); a true v1-only session keeps the legacy single block.
+  `OverlayDeliveryObserver` tracks `UNKNOWN → LEGACY_V1 / REGION_V2`.
+- delivery pending is now per-region (`pending_by_region[region_id]`, latest-wins
+  within a region, never cross-region overwrite) instead of the legacy global
+  capacity-1 slot. Legacy v1 actions keep the single slot.
+- region geometry is snapshotted at explicit OCR start
+  (`ClarifyDeckEngine._resolve_region_layout` → `MainLoopOverlayDelivery.set_region_layout`)
+  using the same 2L.1 resolver as the worker; QAM edits do not live-move running
+  blocks; Stop/Start picks up new geometry. Unknown/disabled regions are not
+  rendered (bounded diagnostic), never crash.
+- protocol: `set_region_text {region_id, rect, text}`, `hide_region_text`,
+  `clear_all_region_text`; `overlay/protocol.sanitize_region_text` validates
+  normalized geometry. One renderer process holds three independent layers:
+  legacy text, per-region text blocks, region preview. Text update/hide never
+  clears preview and vice versa.
+- text blocks: outline-free (text only), rendered inside the region rectangle
+  (`x*surface_width`, `y*surface_height`), character-wrapped to the block width
+  (`protocol.wrap_text`) and vertically clipped (`protocol.clip_lines` + cairo
+  clip). Fixed default font size (20px); no font/scroll controls yet.
+- lifecycle: overlay OFF drops incoming region actions (no replay); enabling
+  overlay starts blocks empty; disabling overlay clears all text blocks but never
+  the preview layer; new session clears old pending + old blocks. Renderer
+  ownership (text/preview reasons) and no-replay/no-auto-start contracts are
+  preserved. OCR/transport/change-gate/capture semantics unchanged.
+- font-size/scroll UX is deferred to Phase 2M.2.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

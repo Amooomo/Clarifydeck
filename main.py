@@ -911,7 +911,27 @@ class ClarifyDeckEngine:
                 "error": "capture_conflict",
                 "detail": "capture producer is RUNNING; stop it before starting the OCR worker",
             }
+        # Start-time region geometry snapshot for the multi-block overlay. The
+        # worker resolves config once at start, so overlay geometry stays stable
+        # for the session (QAM edits apply on the next explicit Start).
+        if self._overlay_delivery is not None:
+            self._overlay_delivery.set_region_layout(self._resolve_region_layout())
         return manager.start(fps=fps, change_gate=change_gate)
+
+    def _resolve_region_layout(self) -> dict:
+        if recognition_regions is None:
+            return {}
+        try:
+            store = recognition_regions.RegionConfigStore(self.roi_config_path())
+            resolver = recognition_regions.RegionResolver(store, legacy_resolver=self._roi_resolver_obj())
+            regions = resolver.resolve_effective_regions(None).regions
+        except Exception:
+            return {}
+        return {
+            region.region_id: (region.x, region.y, region.w, region.h)
+            for region in regions
+            if region.enabled
+        }
 
     def stop_ocr_worker(self) -> dict[str, Any]:
         manager = self._ocr_worker_manager()

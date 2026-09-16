@@ -110,13 +110,23 @@ class FakeRuntime:
 class SpyDelivery:
     def __init__(self):
         self.sessions = []
-        self.submitted = []
+        self.submitted = []  # legacy single-block actions
+        self.region_submitted = []  # per-region block actions
 
     def set_session(self, session_id):
         self.sessions.append(session_id)
 
     def submit(self, action):
         self.submitted.append(action)
+
+    def submit_region(self, action):
+        self.region_submitted.append(action)
+
+    def clear_region_pending(self):
+        pass
+
+    def schedule_clear_region_text(self):
+        pass
 
 
 def _args(**overrides):
@@ -562,38 +572,40 @@ class OverlayCompatibilityTest(unittest.TestCase):
                 clock.value += 3.0
         return [line for line in machine.getvalue().splitlines() if line.strip()]
 
-    def test_o1_v2_primary_alone_no_overlay_action(self) -> None:
+    def test_o1_v2_primary_routes_to_region_block(self) -> None:
         lines = self._lines([region("A")], [[line("Hello")]])
         receiver, delivery = self._receiver()
-        # Feed only the v2 line (skip the v1 projection).
-        receiver.handle_line(lines[0])
+        receiver.handle_line(lines[0])  # v2 only
         self.assertEqual(delivery.submitted, [])
+        self.assertEqual([action.region_id for action in delivery.region_submitted], ["A"])
+        self.assertEqual(delivery.region_submitted[0].text, "Hello")
 
-    def test_o2_paired_v1_primary_is_one_action(self) -> None:
+    def test_o2_paired_v1_compatibility_ignored_by_overlay(self) -> None:
         lines = self._lines([region("A")], [[line("Hello")]])
         receiver, delivery = self._receiver()
-        for line_json in lines:
+        for line_json in lines:  # v2 primary + v1 compatibility
             receiver.handle_line(line_json)
-        self.assertEqual(len(delivery.submitted), 1)
-        self.assertEqual(delivery.submitted[0].text, "Hello")
+        self.assertEqual(delivery.submitted, [])  # no legacy single-block action
+        self.assertEqual(len(delivery.region_submitted), 1)
 
-    def test_o3_secondary_v2_no_overlay_action(self) -> None:
+    def test_o3_secondary_v2_routes_to_region_block(self) -> None:
         lines = self._lines([region("A"), region("B", x=0.5)], [[line("A")], [line("B")]])
         receiver, delivery = self._receiver()
-        # Feed only the secondary v2 line (lines[2]).
-        receiver.handle_line(lines[2])
+        receiver.handle_line(lines[2])  # secondary v2
         self.assertEqual(delivery.submitted, [])
+        self.assertEqual([action.region_id for action in delivery.region_submitted], ["B"])
 
-    def test_o4_primary_clear_projection_is_one_hide(self) -> None:
+    def test_o4_primary_clear_routes_region_hide(self) -> None:
         clock = Clock(0.0)
         lines = self._lines([region("A")], [[line("Hello")], []], clock=clock)
         receiver, delivery = self._receiver()
         for line_json in lines:
             receiver.handle_line(line_json)
-        hides = [action for action in delivery.submitted if action.kind == "hide"]
+        self.assertEqual(delivery.submitted, [])
+        hides = [action for action in delivery.region_submitted if action.kind == "hide"]
         self.assertEqual(len(hides), 1)
 
-    def test_o5_primary_tick_clear_projection_is_one_hide(self) -> None:
+    def test_o5_primary_tick_clear_routes_region_hide(self) -> None:
         clock = Clock(0.0)
         machine = io.StringIO()
         runtime = FakeRuntime([[line("Hello")], []])
@@ -612,15 +624,17 @@ class OverlayCompatibilityTest(unittest.TestCase):
         receiver, delivery = self._receiver()
         for line_json in lines:
             receiver.handle_line(line_json)
-        hides = [action for action in delivery.submitted if action.kind == "hide"]
+        hides = [action for action in delivery.region_submitted if action.kind == "hide"]
         self.assertEqual(len(hides), 1)
+        self.assertEqual(delivery.submitted, [])
 
-    def test_o6_secondary_tick_clear_no_overlay_action(self) -> None:
+    def test_o6_secondary_tick_clear_routes_region_hide(self) -> None:
         clear = StableTextEvent(kind="clear", text="", confidence=None, source_seq=None, timestamp_monotonic=1.0)
         line = t.encode_region_stable_text_event(1, mr.RegionStableTextEvent(region_id="B", event=clear))
         receiver, delivery = self._receiver()
         self.assertTrue(receiver.handle_line(line))
         self.assertEqual(delivery.submitted, [])
+        self.assertEqual([action.region_id for action in delivery.region_submitted], ["B"])
 
 
 if __name__ == "__main__":

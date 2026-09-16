@@ -196,6 +196,7 @@ class OverlayManager:
         self._text_enabled = False
         self._preview_enabled = False
         self._preview_regions: list = []
+        self._region_text: dict = {}
 
     # -- identity ----------------------------------------------------------
 
@@ -237,6 +238,7 @@ class OverlayManager:
             "visible": self._visible,
             "preview_enabled": self._preview_enabled,
             "preview_region_count": len(self._preview_regions),
+            "region_text_count": len(self._region_text),
             "last_error": self._last_error,
         }
 
@@ -316,6 +318,9 @@ class OverlayManager:
             if self._state == OverlayState.RUNNING:
                 self._text_enabled = True
                 self._send({"type": "hide"})
+                # No replay: start with empty text blocks on a fresh enable.
+                self._region_text = {}
+                self._send({"type": "clear_all_region_text"})
                 if self._preview_enabled:
                     self._send_preview_locked()
             return self.status()
@@ -325,6 +330,9 @@ class OverlayManager:
             self._text_enabled = False
             if self._state == OverlayState.RUNNING:
                 self._send({"type": "hide"})
+                # Clear OCR text blocks but never the preview layer.
+                self._region_text = {}
+                self._send({"type": "clear_all_region_text"})
             self._visible = False
             self._last_text = ""
             if not self._preview_enabled and self._state != OverlayState.DISABLED:
@@ -337,9 +345,43 @@ class OverlayManager:
             self._text_enabled = False
             self._preview_enabled = False
             self._preview_regions = []
+            self._region_text = {}
             if self._state != OverlayState.DISABLED:
                 self._teardown_locked()
                 _log("overlay stopped")
+
+    # -- per-region persistent text blocks (Phase 2M.1) --------------------
+
+    async def set_region_text(self, region_id: str, rect: tuple, text: str) -> dict:
+        async with self._lock:
+            key = str(region_id)
+            self._region_text[key] = {"rect": tuple(rect), "text": text}
+            if self._text_enabled and self._state == OverlayState.RUNNING:
+                x, y, w, h = rect
+                self._send(
+                    {
+                        "type": "set_region_text",
+                        "region_id": key,
+                        "rect": {"x": x, "y": y, "w": w, "h": h},
+                        "text": text,
+                    }
+                )
+            return self.status()
+
+    async def hide_region_text(self, region_id: str) -> dict:
+        async with self._lock:
+            key = str(region_id)
+            self._region_text.pop(key, None)
+            if self._state == OverlayState.RUNNING:
+                self._send({"type": "hide_region_text", "region_id": key})
+            return self.status()
+
+    async def clear_all_region_text(self) -> dict:
+        async with self._lock:
+            self._region_text = {}
+            if self._state == OverlayState.RUNNING:
+                self._send({"type": "clear_all_region_text"})
+            return self.status()
 
     # -- region preview (Phase 2L.8.2) -------------------------------------
 

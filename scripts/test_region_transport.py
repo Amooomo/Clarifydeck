@@ -214,11 +214,12 @@ class ObserverBehaviorTest(unittest.TestCase):
         self.assertIsNone(observer.events[0].region_id)
         self.assertEqual(observer.events[0].transport_version, 1)
 
-    def test_o5_single_block_overlay_adapter_ignores_v2(self) -> None:
+    def test_o5_region_v2_routes_to_region_blocks(self) -> None:
         class SpyDelivery:
             def __init__(self):
                 self.sessions = []
                 self.submitted = []
+                self.region_submitted = []
 
             def set_session(self, session_id):
                 self.sessions.append(session_id)
@@ -226,9 +227,19 @@ class ObserverBehaviorTest(unittest.TestCase):
             def submit(self, action):
                 self.submitted.append(action)
 
+            def submit_region(self, action):
+                self.region_submitted.append(action)
+
+            def clear_region_pending(self):
+                pass
+
+            def schedule_clear_region_text(self):
+                pass
+
         delivery = SpyDelivery()
         coordinator = OverlayTextCoordinator()
         observer = OverlayDeliveryObserver(coordinator, delivery)
+        observer.begin_session("s1")
 
         v2 = AcceptedStableTextEvent(
             worker_session_id="s1",
@@ -243,7 +254,8 @@ class ObserverBehaviorTest(unittest.TestCase):
         )
         observer.on_accepted_event(v2)
         self.assertEqual(delivery.submitted, [])
-        self.assertIsNone(coordinator.latest_action())
+        self.assertEqual(len(delivery.region_submitted), 1)
+        self.assertEqual(delivery.region_submitted[0].region_id, "A")
 
         observer.begin_session("s1")
         v1 = AcceptedStableTextEvent(

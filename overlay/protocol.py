@@ -131,3 +131,52 @@ def preview_pixel_rect(region: dict[str, Any], width: int, height: int) -> tuple
         float(region["w"]) * width,
         float(region["h"]) * height,
     )
+
+
+def sanitize_region_text(region_id: Any, rect: Any, text: Any) -> Optional[dict[str, Any]]:
+    """Validate/normalize a per-region text-block payload; return block or None."""
+    if not isinstance(region_id, str) or not region_id or not isinstance(text, str):
+        return None
+    if not isinstance(rect, dict):
+        return None
+    try:
+        x = float(rect["x"])
+        y = float(rect["y"])
+        w = float(rect["w"])
+        h = float(rect["h"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) for v in (x, y, w, h)):
+        return None
+    if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and 0.0 < w <= 1.0 and 0.0 < h <= 1.0):
+        return None
+    return {"rect": {"x": x, "y": y, "w": w, "h": h}, "text": text}
+
+
+def wrap_text(text: str, max_width: float, measure: Any) -> list[str]:
+    """Character-wrap each source line to ``max_width`` using ``measure(str)->float``.
+
+    Newlines are preserved as line breaks; characters are never dropped.
+    """
+    lines: list[str] = []
+    for raw in str(text).split("\n"):
+        if not raw:
+            lines.append("")
+            continue
+        current = ""
+        for char in raw:
+            candidate = current + char
+            if current and measure(candidate) > max_width:
+                lines.append(current)
+                current = char
+            else:
+                current = candidate
+        lines.append(current)
+    return lines
+
+
+def clip_lines(lines: list[str], line_height: float, max_height: float) -> list[str]:
+    """Vertical clip: keep only whole lines that fit inside ``max_height``."""
+    if line_height <= 0 or max_height <= 0:
+        return []
+    return lines[: int(max_height // line_height)]
