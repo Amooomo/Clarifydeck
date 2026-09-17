@@ -527,6 +527,62 @@ check("f: disabled preview label", () =>
   assert.equal(r.regionPreviewLabel(R({ region_id: "a", enabled: false }), 1, null), "Region 2 (off)"),
 );
 
+// -- Phase 2M.2A per-region translucent text panels ---------------------------
+
+check("panel: two runtime styles only", () => {
+  assert.equal(r.PANEL_STYLE_WHITE_ON_BLACK, "white_on_black");
+  assert.equal(r.PANEL_STYLE_BLACK_ON_WHITE, "black_on_white");
+  assert.equal(r.DEFAULT_PANEL_STYLE, "white_on_black");
+  assert.equal(r.isPanelStyle("white_on_black"), true);
+  assert.equal(r.isPanelStyle("black_on_white"), true);
+  assert.equal(r.isPanelStyle("neon"), false);
+  assert.equal(r.isPanelStyle(undefined), false);
+});
+check("panel: labels", () => {
+  assert.equal(r.panelStyleLabel("white_on_black"), "Dark panel");
+  assert.equal(r.panelStyleLabel("black_on_white"), "Light panel");
+  assert.equal(r.panelStyleLabel(undefined), "Dark panel");
+});
+check("panel: style RPCs declared once", () => {
+  for (const needle of ["region_panel_style_get", "region_panel_style_set"]) {
+    assert.equal(countOccurrences(regionComponentSrc, `"${needle}"`), 1, needle);
+  }
+});
+check("panel: selector targets selected region_id", () => {
+  assert.ok(regionComponentSrc.includes("regionPanelStyleSet(selectedId, style)"));
+});
+check("panel: style state keyed by region_id", () => {
+  assert.ok(regionComponentSrc.includes("styleByRegion"));
+  assert.ok(regionComponentSrc.includes("styleByRegion[selectedId]"));
+});
+check("panel: style is session-only (no persistence)", () => {
+  assert.equal(regionComponentSrc.includes("overlay_presentation"), false);
+  assert.equal(regionComponentSrc.includes("localStorage"), false);
+  assert.ok(regionComponentSrc.includes("this session only"));
+});
+check("panel: no font-size control added", () => {
+  for (const needle of ["font_size", "set_region_font", "Font size", "fontSize slider"]) {
+    assert.equal(regionComponentSrc.includes(needle), false, needle);
+  }
+});
+check("panel: no scroll control added", () => {
+  for (const needle of ["scroll_offset", "Scroll Up", "Scroll Down", "region_scroll"]) {
+    assert.equal(regionComponentSrc.includes(needle), false, needle);
+  }
+});
+check("panel: no opacity control added", () => {
+  assert.equal(regionComponentSrc.includes("opacity"), false);
+});
+check("panel: no OCR/renderer lifecycle in style path", () => {
+  for (const needle of ["start_ocr_worker", "stop_ocr_worker", "capture_producer", "set_overlay_enabled", "spawn(", "python3"]) {
+    assert.equal(regionComponentSrc.includes(needle), false, needle);
+  }
+});
+check("panel: editable Region Name not reintroduced", () => {
+  assert.equal(regionComponentSrc.includes('type="text"'), false);
+  assert.equal(regionComponentSrc.includes("setRegionName"), false);
+});
+
 if (process.exitCode) {
   console.error(`\nfrontend OCR diagnostic harness FAILED (${passed} passed)`);
 } else {

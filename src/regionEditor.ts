@@ -258,3 +258,17 @@ export function subscribeRegionPreview(handler: () => void): () => void {
   previewEvents.addEventListener("region-preview", handler);
   return () => previewEvents.removeEventListener("region-preview", handler);
 }
+
+// -- Phase 2M.2A runtime panel styles (session-only; never persisted) ---------
+
+export const PANEL_STYLE_WHITE_ON_BLACK = "white_on_black";
+export const PANEL_STYLE_BLACK_ON_WHITE = "black_on_white";
+export const DEFAULT_PANEL_STYLE = PANEL_STYLE_WHITE_ON_BLACK;
+
+export function isPanelStyle(value: unknown): boolean {
+  return value === PANEL_STYLE_WHITE_ON_BLACK || value === PANEL_STYLE_BLACK_ON_WHITE;
+}
+
+export function panelStyleLabel(style: string | null | undefined): string {
+  return style === PANEL_STYLE_BLACK_ON_WHITE ? "Light panel" : "Dark panel";
+}

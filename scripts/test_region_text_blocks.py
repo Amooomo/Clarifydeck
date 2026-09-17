@@ -292,6 +292,74 @@ class ShortRegionRenderGuardTest(unittest.TestCase):
         self.assertEqual("".join(visible), text)
 
 
+class RegionPanelStyleTest(unittest.TestCase):
+    """Phase 2M.2A: two fixed per-region panel styles, fixed alpha, exact geometry."""
+
+    def test_default_and_allowed_styles(self) -> None:
+        self.assertEqual(protocol.DEFAULT_STYLE, protocol.STYLE_WHITE_ON_BLACK)
+        self.assertEqual(
+            protocol.STYLES, (protocol.STYLE_WHITE_ON_BLACK, protocol.STYLE_BLACK_ON_WHITE)
+        )
+        self.assertEqual(protocol.sanitize_region_style("white_on_black"), "white_on_black")
+        self.assertEqual(protocol.sanitize_region_style("black_on_white"), "black_on_white")
+
+    def test_invalid_styles_rejected(self) -> None:
+        for bad in (None, "", "neon", "WHITE_ON_BLACK", 1, True, {}, []):
+            self.assertIsNone(protocol.sanitize_region_style(bad), bad)
+
+    def test_white_on_black_colors(self) -> None:
+        text, panel = protocol.style_colors(protocol.STYLE_WHITE_ON_BLACK)
+        self.assertEqual(text, (1.0, 1.0, 1.0, 1.0))
+        self.assertEqual(panel, (0.0, 0.0, 0.0, protocol.PANEL_ALPHA))
+
+    def test_black_on_white_colors(self) -> None:
+        text, panel = protocol.style_colors(protocol.STYLE_BLACK_ON_WHITE)
+        self.assertEqual(text, (0.0, 0.0, 0.0, 1.0))
+        self.assertEqual(panel, (1.0, 1.0, 1.0, protocol.PANEL_ALPHA))
+
+    def test_unknown_style_falls_back_to_default(self) -> None:
+        self.assertEqual(protocol.style_colors(None), protocol.style_colors(protocol.DEFAULT_STYLE))
+        self.assertEqual(protocol.style_colors("neon"), protocol.style_colors(protocol.DEFAULT_STYLE))
+
+    def test_panel_alpha_fixed(self) -> None:
+        self.assertEqual(protocol.PANEL_ALPHA, 0.65)
+        self.assertEqual(
+            protocol.style_colors(protocol.STYLE_WHITE_ON_BLACK)[1][3], protocol.PANEL_ALPHA
+        )
+        self.assertEqual(
+            protocol.style_colors(protocol.STYLE_BLACK_ON_WHITE)[1][3], protocol.PANEL_ALPHA
+        )
+
+    def test_exact_panel_geometry(self) -> None:
+        rect = {"x": 0.14, "y": 0.76, "w": 0.13, "h": 0.04}
+        left, top, width, height = protocol.preview_pixel_rect(rect, 1280, 800)
+        self.assertAlmostEqual(left, 0.14 * 1280)
+        self.assertAlmostEqual(top, 0.76 * 800)
+        self.assertAlmostEqual(width, 0.13 * 1280)
+        self.assertAlmostEqual(height, 0.04 * 800)
+
+    def test_short_region_panel_with_one_line(self) -> None:
+        rect = {"x": 0.14, "y": 0.76, "w": 0.13, "h": 0.04}
+        _left, _top, width, height = protocol.preview_pixel_rect(rect, 1280, 800)
+        padding = 8.0
+        line_h = 20.0 * 1.3
+        self.assertGreater(width - 2 * padding, 0)
+        self.assertGreater(height - 2 * padding, 0)
+        lines = protocol.wrap_text("PRESS START", width - 2 * padding, lambda s: len(s) * 14.0)
+        visible = protocol.clip_lines(lines, line_h, height - 2 * padding)
+        self.assertGreaterEqual(len(visible), 1)
+
+    def test_cjk_with_both_styles(self) -> None:
+        text = "九州一番星店长"
+        for style in protocol.STYLES:
+            text_rgba, panel_rgba = protocol.style_colors(style)
+            self.assertEqual(len(text_rgba), 4)
+            self.assertEqual(len(panel_rgba), 4)
+            lines = protocol.wrap_text(text, 200.0, lambda s: len(s) * 14.0)
+            visible = protocol.clip_lines(lines, 26.0, 16.0)
+            self.assertEqual("".join(visible), text)
+
+
 class SpyDelivery:
     def __init__(self):
         self.sessions = []

@@ -21,6 +21,13 @@ MAX_REGION_LABEL_CHARS = 32
 DEFAULT_FONT_SIZE = 24
 DEFAULT_BACKGROUND_ALPHA = 0.55
 
+# Phase 2M.2A per-region text panel styles. Runtime-only: never persisted.
+STYLE_WHITE_ON_BLACK = "white_on_black"
+STYLE_BLACK_ON_WHITE = "black_on_white"
+STYLES = (STYLE_WHITE_ON_BLACK, STYLE_BLACK_ON_WHITE)
+DEFAULT_STYLE = STYLE_WHITE_ON_BLACK
+PANEL_ALPHA = 0.65
+
 
 def runtime_dir() -> Path:
     override = os.environ.get("CLARIFYDECK_OVERLAY_RUNTIME_DIR")
@@ -151,6 +158,22 @@ def sanitize_region_text(region_id: Any, rect: Any, text: Any) -> Optional[dict[
     if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and 0.0 < w <= 1.0 and 0.0 < h <= 1.0):
         return None
     return {"rect": {"x": x, "y": y, "w": w, "h": h}, "text": text}
+
+
+def sanitize_region_style(value: Any) -> Optional[str]:
+    """Validate a per-region panel style; return the canonical value or None."""
+    return value if isinstance(value, str) and value in STYLES else None
+
+
+def style_colors(style: Any) -> tuple[tuple[float, float, float, float], tuple[float, float, float, float]]:
+    """Return ``(text_rgba, panel_rgba)`` for a style.
+
+    Unknown/missing styles fall back to the default WHITE_ON_BLACK. The panel is
+    always drawn at the single fixed ``PANEL_ALPHA``.
+    """
+    if style == STYLE_BLACK_ON_WHITE:
+        return (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0, PANEL_ALPHA)
+    return (1.0, 1.0, 1.0, 1.0), (0.0, 0.0, 0.0, PANEL_ALPHA)
 
 
 def wrap_text(text: str, max_width: float, measure: Any) -> list[str]:

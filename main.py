@@ -31,6 +31,13 @@ except Exception:  # pragma: no cover - optional at import time
         raise RuntimeError("python3_not_found")
 
 try:
+    from overlay import protocol as overlay_protocol
+except Exception:  # pragma: no cover - optional at import time
+    overlay_protocol = None  # type: ignore[assignment]
+
+_DEFAULT_PANEL_STYLE = getattr(overlay_protocol, "DEFAULT_STYLE", "white_on_black")
+
+try:
     from backend_leader import BackgroundLeaderLease, LeaderAcquireResult
 except Exception:  # pragma: no cover - optional at import time
     BackgroundLeaderLease = None  # type: ignore[assignment]
@@ -672,6 +679,26 @@ class ClarifyDeckEngine:
         except Exception as exc:
             decky.logger.error(f"region preview clear failed: {exc}")
             return {"ok": False, "error": "region_preview_failed", "detail": str(exc)}
+
+    # -- Phase 2M.2A runtime per-region panel style (no persistence) --------
+
+    async def region_panel_style_get(self, region_id: str) -> dict[str, Any]:
+        if self._overlay is None:
+            return {"ok": True, "region_id": str(region_id), "style": _DEFAULT_PANEL_STYLE}
+        try:
+            return await self._overlay.get_region_panel_style(region_id)
+        except Exception as exc:
+            decky.logger.error(f"region panel style get failed: {exc}")
+            return {"ok": False, "error": "region_panel_style_failed", "detail": str(exc)}
+
+    async def region_panel_style_set(self, region_id: str, style: str) -> dict[str, Any]:
+        if self._role != "leader" or self._overlay is None:
+            return {"ok": False, "error": "overlay_unavailable"}
+        try:
+            return await self._overlay.set_region_panel_style(region_id, style)
+        except Exception as exc:
+            decky.logger.error(f"region panel style set failed: {exc}")
+            return {"ok": False, "error": "region_panel_style_failed", "detail": str(exc)}
 
     def capture_test(self, mode: str = "base_plane_only", output: str = "") -> dict[str, Any]:
         """One-shot capture isolation test. Never starts a loop, OCR or overlay."""
@@ -1539,6 +1566,12 @@ class Plugin:
 
     async def clear_region_preview(self) -> dict[str, Any]:
         return await get_engine().clear_region_preview()
+
+    async def region_panel_style_get(self, region_id: str) -> dict[str, Any]:
+        return await get_engine().region_panel_style_get(region_id)
+
+    async def region_panel_style_set(self, region_id: str, style: str) -> dict[str, Any]:
+        return await get_engine().region_panel_style_set(region_id, style)
 
     async def capture_test_base_plane(self, output: str = "") -> dict[str, Any]:
         loop = asyncio.get_event_loop()

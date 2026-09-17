@@ -7,14 +7,19 @@ import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
 import { callable, useQuickAccessVisible } from "@decky/api";
 import { type CSSProperties, useEffect, useRef, useState } from "react";
 import {
+  DEFAULT_PANEL_STYLE,
   MAX_REGIONS,
+  PANEL_STYLE_BLACK_ON_WHITE,
+  PANEL_STYLE_WHITE_ON_BLACK,
   canAddRegion,
   clearRegionPreview,
   describeSource,
   draftsForApply,
+  isPanelStyle,
   moveRegion,
   newRegionDraft,
   nextSelectionAfterRemove,
+  panelStyleLabel,
   primaryRegionId,
   regionLabel,
   regionPreviewPayload,
@@ -42,6 +47,17 @@ const setRegionPreviewEnabled = callable<[enabled: boolean], OverlayControlResul
 const setRegionPreviewRegions = callable<[regions: RegionPreviewRegion[]], OverlayControlResult>("set_region_preview");
 const clearRegionPreviewRegions = callable<[], OverlayControlResult>("clear_region_preview");
 
+// Phase 2M.2A runtime-only per-region panel style. Not persisted.
+type PanelStyleResult = {
+  ok?: boolean;
+  error?: string;
+  detail?: string;
+  region_id?: string;
+  style?: string;
+};
+const regionPanelStyleGet = callable<[regionId: string], PanelStyleResult>("region_panel_style_get");
+const regionPanelStyleSet = callable<[regionId: string, style: string], PanelStyleResult>("region_panel_style_set");
+
 // No app_id source exists in the QAM yet, so "This Game" is unavailable.
 const CURRENT_APP_ID: string | null = null;
 
@@ -53,6 +69,7 @@ export function RegionEditorSection() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [previewOn, setPreviewOn] = useState(false);
+  const [styleByRegion, setStyleByRegion] = useState<Record<string, string>>({});
   const mounted = useRef(true);
   const previewOnRef = useRef(false);
   const qamVisible = useQuickAccessVisible();
@@ -94,6 +111,44 @@ export function RegionEditorSection() {
 
   const selected = drafts.find((region) => region.region_id === selectedId) ?? null;
   const primaryId = primaryRegionId(drafts);
+  const selectedStyle = (selectedId && styleByRegion[selectedId]) || DEFAULT_PANEL_STYLE;
+
+  // Load the selected region's runtime panel style (session-only, no persistence).
+  useEffect(() => {
+    if (!selectedId) {
+      return;
+    }
+    void (async () => {
+      try {
+        const result = await regionPanelStyleGet(selectedId);
+        if (mounted.current && result && result.ok !== false) {
+          const style = isPanelStyle(result.style) ? (result.style as string) : DEFAULT_PANEL_STYLE;
+          setStyleByRegion((current) => ({ ...current, [selectedId]: style }));
+        }
+      } catch (err) {
+        if (mounted.current) {
+          setError(`Panel style failed: ${String(err)}`);
+        }
+      }
+    })();
+  }, [selectedId]);
+
+  const choosePanelStyle = async (style: string) => {
+    if (!selectedId) {
+      return;
+    }
+    setStyleByRegion((current) => ({ ...current, [selectedId]: style }));
+    try {
+      const result = await regionPanelStyleSet(selectedId, style);
+      if (mounted.current && result && result.ok === false) {
+        setError(result.detail || result.error || "Panel style failed");
+      }
+    } catch (err) {
+      if (mounted.current) {
+        setError(`Panel style failed: ${String(err)}`);
+      }
+    }
+  };
 
   // In-QAM draft preview store (also feeds the renderer preview below).
   useEffect(() => {
@@ -330,6 +385,29 @@ export function RegionEditorSection() {
               setDrafts((current) => updateRegionGeometry(current, selected.region_id, { h: value / 100 }))
             }
           />
+          <PanelSectionRow>
+            <div style={hintStyle}>Text panel style (this session only)</div>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <div style={rowActionsStyle}>
+              <ButtonItem
+                layout="below"
+                disabled={busy}
+                onClick={() => void choosePanelStyle(PANEL_STYLE_WHITE_ON_BLACK)}
+              >
+                {selectedStyle === PANEL_STYLE_WHITE_ON_BLACK ? "[x] " : "[ ] "}
+                {panelStyleLabel(PANEL_STYLE_WHITE_ON_BLACK)}
+              </ButtonItem>
+              <ButtonItem
+                layout="below"
+                disabled={busy}
+                onClick={() => void choosePanelStyle(PANEL_STYLE_BLACK_ON_WHITE)}
+              >
+                {selectedStyle === PANEL_STYLE_BLACK_ON_WHITE ? "[x] " : "[ ] "}
+                {panelStyleLabel(PANEL_STYLE_BLACK_ON_WHITE)}
+              </ButtonItem>
+            </div>
+          </PanelSectionRow>
         </>
       ) : null}
       <PanelSectionRow>

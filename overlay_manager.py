@@ -197,6 +197,8 @@ class OverlayManager:
         self._preview_enabled = False
         self._preview_regions: list = []
         self._region_text: dict = {}
+        # Phase 2M.2A runtime-only per-region panel style (never persisted).
+        self._region_style: dict = {}
 
     # -- identity ----------------------------------------------------------
 
@@ -355,7 +357,8 @@ class OverlayManager:
     async def set_region_text(self, region_id: str, rect: tuple, text: str) -> dict:
         async with self._lock:
             key = str(region_id)
-            self._region_text[key] = {"rect": tuple(rect), "text": text}
+            style = self._region_style.get(key, protocol.DEFAULT_STYLE)
+            self._region_text[key] = {"rect": tuple(rect), "text": text, "style": style}
             if self._text_enabled and self._state == OverlayState.RUNNING:
                 x, y, w, h = rect
                 self._send(
@@ -364,9 +367,41 @@ class OverlayManager:
                         "region_id": key,
                         "rect": {"x": x, "y": y, "w": w, "h": h},
                         "text": text,
+                        "style": style,
                     }
                 )
             return self.status()
+
+    async def get_region_panel_style(self, region_id: str) -> dict:
+        async with self._lock:
+            key = str(region_id) if region_id is not None else ""
+            return {
+                "ok": True,
+                "region_id": key,
+                "style": self._region_style.get(key, protocol.DEFAULT_STYLE),
+            }
+
+    async def set_region_panel_style(self, region_id: str, style: str) -> dict:
+        """Remember a region's runtime panel style; update a visible block live.
+
+        Never starts/stops OCR or the renderer, never changes geometry, and never
+        creates an empty panel when no text block exists for the region.
+        """
+        async with self._lock:
+            key = str(region_id) if region_id is not None else ""
+            normalized = protocol.sanitize_region_style(style)
+            if not key or normalized is None:
+                return {
+                    "ok": False,
+                    "error": "invalid_style",
+                    "region_id": key,
+                    "style": self._region_style.get(key, protocol.DEFAULT_STYLE),
+                }
+            self._region_style[key] = normalized
+            if self._state == OverlayState.RUNNING and key in self._region_text:
+                self._region_text[key]["style"] = normalized
+                self._send({"type": "set_region_style", "region_id": key, "style": normalized})
+            return {"ok": True, "region_id": key, "style": normalized}
 
     async def hide_region_text(self, region_id: str) -> dict:
         async with self._lock:

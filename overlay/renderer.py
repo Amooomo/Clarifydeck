@@ -424,10 +424,15 @@ class OverlayRenderer:
             text = block["text"]
             if width <= 2 * padding or height <= 2 * padding or not text:
                 continue
+            text_rgba, panel_rgba = protocol.style_colors(block.get("style"))
             libcairo.cairo_save(self.cairo)
             libcairo.cairo_rectangle(self.cairo, left, top, width, height)
             libcairo.cairo_clip(self.cairo)
-            libcairo.cairo_set_source_rgba(self.cairo, 1.0, 1.0, 1.0, 1.0)
+            # Semi-transparent panel fills the exact configured region rectangle.
+            libcairo.cairo_set_source_rgba(self.cairo, *panel_rgba)
+            libcairo.cairo_rectangle(self.cairo, left, top, width, height)
+            libcairo.cairo_fill(self.cairo)
+            libcairo.cairo_set_source_rgba(self.cairo, *text_rgba)
             lines = protocol.wrap_text(text, width - 2 * padding, self._measure_cairo)
             lines = protocol.clip_lines(lines, line_h, height - 2 * padding)
             baseline = top + padding + font_size
@@ -752,7 +757,18 @@ def serve(renderer: OverlayRenderer, sock_path: Path, parent_pid: int = 0) -> in
                         region_id = payload.get("region_id")
                         block = protocol.sanitize_region_text(region_id, payload.get("rect"), payload.get("text", ""))
                         if block is not None:
+                            block["style"] = (
+                                protocol.sanitize_region_style(payload.get("style")) or protocol.DEFAULT_STYLE
+                            )
                             renderer.region_text[str(region_id)] = block
+                            renderer.draw()
+                        continue
+                    if action == "set_region_style":
+                        region_id = str(payload.get("region_id", ""))
+                        style = protocol.sanitize_region_style(payload.get("style"))
+                        block = renderer.region_text.get(region_id)
+                        if block is not None and style is not None:
+                            block["style"] = style
                             renderer.draw()
                         continue
                     if action == "hide_region_text":

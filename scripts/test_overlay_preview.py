@@ -376,6 +376,137 @@ class ManagerPreviewTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    # -- Phase 2M.2A runtime per-region panel style ------------------------
+
+    def test_style_default_is_white_on_black(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            result = await manager.get_region_panel_style("A")
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["style"], "white_on_black")
+
+        asyncio.run(run())
+
+    def test_style_set_remembered(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            result = await manager.set_region_panel_style("A", "black_on_white")
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["style"], "black_on_white")
+            self.assertEqual((await manager.get_region_panel_style("A"))["style"], "black_on_white")
+
+        asyncio.run(run())
+
+    def test_style_invalid_rejected_preserves_previous(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.set_region_panel_style("A", "black_on_white")
+            bad = await manager.set_region_panel_style("A", "neon")
+            self.assertFalse(bad["ok"])
+            self.assertEqual(bad["error"], "invalid_style")
+            self.assertEqual((await manager.get_region_panel_style("A"))["style"], "black_on_white")
+
+        asyncio.run(run())
+
+    def test_style_change_does_not_start_renderer(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.set_region_panel_style("A", "black_on_white")
+            self.assertEqual(self.spawn_calls["n"], 0)
+            self.assertEqual(manager.status()["state"], "DISABLED")
+
+        asyncio.run(run())
+
+    def test_style_without_text_sends_nothing(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            manager._sock.sent.clear()
+            await manager.set_region_panel_style("A", "black_on_white")
+            self.assertEqual(manager._sock.types(), [])
+            self.assertEqual(manager.status()["region_text_count"], 0)
+
+        asyncio.run(run())
+
+    def test_style_updates_visible_block_live(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            await manager.set_region_text("A", (0.1, 0.1, 0.2, 0.2), "hi")
+            manager._sock.sent.clear()
+            result = await manager.set_region_panel_style("A", "black_on_white")
+            self.assertTrue(result["ok"])
+            self.assertEqual(manager._sock.types(), ["set_region_style"])
+            payload = json.loads(manager._sock.sent[-1].decode())
+            self.assertEqual(payload["region_id"], "A")
+            self.assertEqual(payload["style"], "black_on_white")
+            self.assertEqual(manager._region_text["A"]["style"], "black_on_white")
+
+        asyncio.run(run())
+
+    def test_set_region_text_includes_current_style(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            await manager.set_region_panel_style("A", "black_on_white")
+            manager._sock.sent.clear()
+            await manager.set_region_text("A", (0.1, 0.1, 0.2, 0.2), "hi")
+            payload = json.loads(manager._sock.sent[-1].decode())
+            self.assertEqual(payload["type"], "set_region_text")
+            self.assertEqual(payload["style"], "black_on_white")
+
+        asyncio.run(run())
+
+    def test_styles_independent_between_regions(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            await manager.set_region_text("A", (0.1, 0.1, 0.2, 0.2), "a")
+            await manager.set_region_text("B", (0.5, 0.5, 0.2, 0.2), "b")
+            await manager.set_region_panel_style("A", "black_on_white")
+            self.assertEqual((await manager.get_region_panel_style("A"))["style"], "black_on_white")
+            self.assertEqual((await manager.get_region_panel_style("B"))["style"], "white_on_black")
+            self.assertEqual(manager._region_text["B"]["style"], "white_on_black")
+
+        asyncio.run(run())
+
+    def test_style_memory_survives_disable_within_lifetime(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            await manager.set_region_panel_style("A", "black_on_white")
+            await manager.disable()
+            self.assertEqual((await manager.get_region_panel_style("A"))["style"], "black_on_white")
+
+        asyncio.run(run())
+
+    def test_clear_all_keeps_style_memory(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            await manager.set_region_text("A", (0.1, 0.1, 0.2, 0.2), "a")
+            await manager.set_region_panel_style("A", "black_on_white")
+            await manager.clear_all_region_text()
+            self.assertEqual(manager.status()["region_text_count"], 0)
+            self.assertEqual((await manager.get_region_panel_style("A"))["style"], "black_on_white")
+
+        asyncio.run(run())
+
+    def test_panel_and_preview_coexist(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            await manager.set_region_preview_enabled(True)
+            await manager.set_region_preview([{"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}])
+            await manager.set_region_text("A", (0.1, 0.1, 0.2, 0.2), "a")
+            self.assertEqual(manager.status()["region_text_count"], 1)
+            self.assertEqual(manager.status()["preview_region_count"], 1)
+            await manager.clear_all_region_text()
+            self.assertEqual(manager.status()["region_text_count"], 0)
+            self.assertEqual(manager.status()["preview_region_count"], 1)
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

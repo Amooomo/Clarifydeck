@@ -1718,7 +1718,15 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
 
 ## Phase 2M.1.1 — Short-Region Glyph Render Guard
 
-Status: LOCAL PASS / DEVICE RETEST PENDING
+Status: DEVICE PASS / CLOSED
+
+Device validation (from `04e6b45c92b41da86ea678f0194be3b6d2149766`):
+- `h=0.04` Stable Text remained present
+- `h=0.04` overlay glyph rendered
+- exact region clipping preserved (no glyph leak)
+- Region 2 unchanged and independent
+- Preview / Persistent Overlay lifecycle remained stable
+- no new Python Exception
 
 - real device reproduction at `h=0.04`: Region 1 stable text was recognized and
   its text block existed, but no glyph was drawn, while Region 2 (`h=0.13`)
@@ -1742,6 +1750,45 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
   full lines is still exactly N; only the zero-line edge case changes.
 - no OCR / transport / change-gate / capture / region-persistence / renderer
   lifecycle / preview lifecycle changes; frontend untouched.
+
+Accepted lifecycle observation (frozen, not part of any gate):
+- Persistent Overlay re-enable preserves no-replay semantics; old backend Stable
+  Text is not replayed automatically. In the tested device flow, Stop OCR ->
+  Start OCR caused text to render again. This is accepted/deferred.
+
+## Phase 2M.2A — Per-Region Semi-Transparent Text Panels
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+- every visible per-region OCR text block now draws a semi-transparent panel
+  filling its exact configured region rectangle, with the text on top; the
+  Region Preview outline/label is still drawn last, so editing stays legible.
+- exactly two fixed styles: `WHITE_ON_BLACK` (opaque white text, translucent
+  black panel) and `BLACK_ON_WHITE` (opaque black text, translucent white panel).
+  One fixed panel alpha (`protocol.PANEL_ALPHA = 0.65`). No opacity UI.
+- style is per-region, keyed by stable `region_id` (never index/label/order),
+  default `WHITE_ON_BLACK`. Runtime/in-memory only: `OverlayManager._region_style`
+  remembers a region's style across text updates and across overlay
+  disable/enable within one backend lifetime; it resets on backend restart.
+- `set_region_text` carries the region's effective style to the renderer; a
+  narrow `set_region_style {region_id, style}` renderer command updates an
+  already-visible block live. A style change never creates an empty panel, never
+  starts/stops OCR, never starts the renderer, and never changes geometry.
+- narrow backend API: `region_panel_style_get(region_id)` (missing ->
+  `WHITE_ON_BLACK`) and `region_panel_style_set(region_id, style)` (exactly the
+  two styles; invalid rejected safely, previous value preserved). The old broad
+  `region_presentation_get` is NOT restored.
+- minimal QAM control on the selected region ("Dark panel" / "Light panel",
+  session-only). No font-size, scroll, opacity, or custom-color controls.
+- panel/clear semantics: a panel exists only with a visible text block;
+  `hide_region_text` and `clear_all_region_text` remove text and panel together
+  and never leave an empty translucent rectangle. Style memory is not a panel.
+- the 2M.1.1 short-region guard is preserved: `h=0.04` renders the exact 32px
+  panel plus at least one clipped text line, with no panel/glyph leak.
+- no persistence: no `overlay_presentation.json`, no `recognition_roi.json`
+  schema change, no new settings file. No OCR/transport/change-gate/capture
+  changes; no scrolling; no touch/input work; renderer ownership and the
+  no-replay lifecycle are unchanged.
 
 ## Phase 2C.2 Wayland environment
 
