@@ -104,6 +104,53 @@ class MultiRegionOCRCoordinator:
         self._latency.clear()
         return samples
 
+    # -- Phase 2N.4 first-candidate reliability audit (observational) ------
+
+    def drain_audit(self) -> list[dict]:
+        """Return and clear pending first-candidate audit records (per region)."""
+        records = []
+        for state in self._states.values():
+            record = state.stabilizer.take_audit_record()
+            if record is not None:
+                records.append(record)
+        return records
+
+    def audit_recent(self) -> list[dict]:
+        records: list[dict] = []
+        for state in self._states.values():
+            records.extend(state.stabilizer.audit_recent())
+        return records[-MAX_LATENCY_SAMPLES:]
+
+    def audit_summary(self) -> dict:
+        merged = {
+            "transitions_total": 0,
+            "clear_transitions": 0,
+            "first_matches_final": 0,
+            "first_differs_from_final": 0,
+            "confidence_buckets": {},
+        }
+        savings: list[float] = []
+        for state in self._states.values():
+            summary = state.stabilizer.audit_summary()
+            merged["transitions_total"] += summary["transitions_total"]
+            merged["clear_transitions"] += summary["clear_transitions"]
+            merged["first_matches_final"] += summary["first_matches_final"]
+            merged["first_differs_from_final"] += summary["first_differs_from_final"]
+            for key, value in summary["confidence_buckets"].items():
+                entry = merged["confidence_buckets"].setdefault(
+                    key, {"count": 0, "matches": 0, "saving_ms_sum": 0.0}
+                )
+                entry["count"] += value["count"]
+                entry["matches"] += value["matches"]
+                entry["saving_ms_sum"] = round(entry["saving_ms_sum"] + value["saving_ms_sum"], 3)
+            savings.extend(state.stabilizer.audit_savings())
+        total = merged["transitions_total"]
+        merged["match_rate"] = round(merged["first_matches_final"] / total, 4) if total else None
+        savings.sort()
+        merged["median_first_to_accept_ms"] = savings[len(savings) // 2] if savings else None
+        merged["regions"] = len(self._states)
+        return merged
+
     # -- execution ---------------------------------------------------------
 
     def process_frame(self, frame: Any, regions: Iterable[RecognitionRegion]) -> list[RegionStableTextEvent]:
@@ -139,6 +186,7 @@ class MultiRegionOCRCoordinator:
         events: list[RegionStableTextEvent] = []
         for region in enabled:
             state = self._ensure_state(region)
+            state.stabilizer.audit_region_id = region.region_id
             pixel = region_pixel_rect(region, frame_width, frame_height)
             crop_started = self._clock()
             crop_width, crop_height, crop = crop_rgba(rgba, frame_width, frame_height, pixel)

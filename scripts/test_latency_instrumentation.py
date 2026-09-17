@@ -222,9 +222,18 @@ class WorkerLatencyJournalTest(unittest.TestCase):
 
         captured: list[str] = []
         manager = OCRWorkerManager(logger=captured.append)
-        manager._proc = SimpleNamespace(stderr=_Stream([b"[latency] region=A frame=2\n", b"other line\n"]))
+        manager._proc = SimpleNamespace(
+            stderr=_Stream(
+                [
+                    b"[latency] region=A frame=2\n",
+                    b"[stabilizer-audit] region=A frame=2 first_matches_final=1\n",
+                    b"other line\n",
+                ]
+            )
+        )
         manager._read_stderr()
         self.assertTrue(any("[latency]" in line for line in captured))
+        self.assertTrue(any("[stabilizer-audit]" in line for line in captured))
         self.assertFalse(any("other line" in line for line in captured))
 
 

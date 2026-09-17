@@ -12,6 +12,7 @@ synchronously after each OCR result (no background worker).
 
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 import unicodedata
@@ -24,6 +25,11 @@ DEFAULT_CONSENSUS_REQUIRED = 2
 DEFAULT_HISTORY_SIZE = 3
 DEFAULT_STALE_TIMEOUT_SEC = 2.0
 DEFAULT_LINE_SEPARATOR = "\n"
+
+# Phase 2N.4: bounded, runtime-only first-candidate reliability audit.
+MAX_AUDIT_RECORDS = 16
+MAX_AUDIT_SAVINGS = 64
+AUDIT_CONFIDENCE_BUCKETS = ("0.70-0.79", "0.80-0.89", "0.90-0.94", "0.95-1.00")
 
 _INNER_SPACE_RE = re.compile(r"[ \t]+")
 
@@ -59,6 +65,37 @@ class StabilizerStats:
     stable_text_emits: int = 0
     duplicate_suppressed: int = 0
     clear_emits: int = 0
+
+
+@dataclass
+class StabilizerAuditStats:
+    """Phase 2N.4 aggregate counters for first-candidate reliability (runtime-only)."""
+
+    transitions_total: int = 0
+    clear_transitions: int = 0
+    first_matches_final: int = 0
+    first_differs_from_final: int = 0
+    # bucket label -> {"count", "matches", "saving_ms_sum"}
+    confidence_buckets: dict = field(default_factory=dict)
+
+
+def _audit_digest(text: str) -> str:
+    """Short process-local digest (never persisted; not a content log)."""
+    return hashlib.blake2b(text.encode("utf-8"), digest_size=4).hexdigest()
+
+
+def audit_confidence_bucket(confidence: float) -> str:
+    try:
+        value = float(confidence)
+    except (TypeError, ValueError):
+        return AUDIT_CONFIDENCE_BUCKETS[0]
+    if value < 0.80:
+        return "0.70-0.79"
+    if value < 0.90:
+        return "0.80-0.89"
+    if value < 0.95:
+        return "0.90-0.94"
+    return "0.95-1.00"
 
 
 def normalize_line(text: Optional[str]) -> str:
@@ -108,6 +145,13 @@ class OCRStabilizer:
         self._last_consensus = 0
         self._last_observation_had_text = False
         self._stats = StabilizerStats()
+        # Phase 2N.4 first-candidate reliability audit (observational only).
+        self.audit_region_id: Optional[str] = None
+        self._audit_trial: Optional[dict] = None
+        self._audit_pending: Optional[dict] = None
+        self._audit_recent: deque = deque(maxlen=MAX_AUDIT_RECORDS)
+        self._audit_savings: deque = deque(maxlen=MAX_AUDIT_SAVINGS)
+        self._audit_stats = StabilizerAuditStats()
 
     # -- validation --------------------------------------------------------
 
@@ -217,12 +261,14 @@ class OCRStabilizer:
         self._clear_emitted = False
         self._history.append(candidate)
         self._last_consensus = sum(1 for item in self._history if item.text == candidate.text)
+        self._audit_observe(candidate)
 
         if self._last_consensus < self._consensus_required:
             return []
         if candidate.text == self._last_emitted_text:
             self._stats.duplicate_suppressed += 1
             return []
+        self._audit_finalize(candidate, now)
         self._last_emitted_text = candidate.text
         self._stats.stable_text_emits += 1
         return [
@@ -243,6 +289,7 @@ class OCRStabilizer:
         self._clear_emitted = True
         self._last_emitted_text = None
         self._stats.clear_emits += 1
+        self._audit_note_clear()
         return [
             StableTextEvent(
                 kind="clear",
@@ -265,6 +312,11 @@ class OCRStabilizer:
         self._last_consensus = 0
         self._last_observation_had_text = False
         self._stats = StabilizerStats()
+        self._audit_trial = None
+        self._audit_pending = None
+        self._audit_recent.clear()
+        self._audit_savings.clear()
+        self._audit_stats = StabilizerAuditStats()
 
     def stats(self) -> StabilizerStats:
         return self._stats
@@ -300,6 +352,112 @@ class OCRStabilizer:
             if candidate.text == text:
                 return candidate.timestamp_monotonic
         return None
+
+    # -- Phase 2N.4 first-candidate reliability audit (observational) ------
+
+    def take_audit_record(self) -> Optional[dict]:
+        record = self._audit_pending
+        self._audit_pending = None
+        return record
+
+    def audit_recent(self) -> list:
+        return list(self._audit_recent)
+
+    def audit_savings(self) -> list:
+        return list(self._audit_savings)
+
+    def audit_summary(self) -> dict:
+        stats = self._audit_stats
+        total = stats.transitions_total
+        savings = sorted(self._audit_savings)
+        median = savings[len(savings) // 2] if savings else None
+        return {
+            "region_id": self.audit_region_id,
+            "transitions_total": total,
+            "clear_transitions": stats.clear_transitions,
+            "first_matches_final": stats.first_matches_final,
+            "first_differs_from_final": stats.first_differs_from_final,
+            "match_rate": round(stats.first_matches_final / total, 4) if total else None,
+            "median_first_to_accept_ms": median,
+            "confidence_buckets": {key: dict(value) for key, value in stats.confidence_buckets.items()},
+        }
+
+    def _audit_observe(self, candidate: OCRCandidate) -> None:
+        current = self._last_emitted_text
+        if current is not None and candidate.text == current:
+            # Repeated already-stable text: never starts a transition trial.
+            self._audit_trial = None
+            return
+        if self._audit_trial is None:
+            self._audit_trial = {
+                "text": candidate.text,
+                "digest": _audit_digest(candidate.text),
+                "length": len(candidate.text),
+                "confidence": candidate.confidence,
+                "timestamp": candidate.timestamp_monotonic,
+                "source_seq": candidate.source_seq,
+                "count": 1,
+                "distinct": {candidate.text},
+            }
+        else:
+            self._audit_trial["count"] += 1
+            self._audit_trial["distinct"].add(candidate.text)
+
+    def _audit_finalize(self, candidate: OCRCandidate, now: float) -> None:
+        trial = self._audit_trial
+        if trial is None:
+            trial = {
+                "text": candidate.text,
+                "digest": _audit_digest(candidate.text),
+                "length": len(candidate.text),
+                "confidence": candidate.confidence,
+                "timestamp": candidate.timestamp_monotonic,
+                "source_seq": candidate.source_seq,
+                "count": 1,
+                "distinct": {candidate.text},
+            }
+        matches = trial["text"] == candidate.text
+        first_to_accept_ms = round((now - trial["timestamp"]) * 1000.0, 3)
+        saving_ms = first_to_accept_ms if matches else 0.0
+        record = {
+            "region_id": self.audit_region_id,
+            "frame_seq": candidate.source_seq,
+            "first_candidate_seq": trial["source_seq"],
+            "candidate_count_until_accept": trial["count"],
+            "first_candidate_confidence": trial["confidence"],
+            "accepted_candidate_confidence": candidate.confidence,
+            "first_matches_final": matches,
+            "first_candidate_length": trial["length"],
+            "final_length": len(candidate.text),
+            "first_candidate_to_accept_ms": first_to_accept_ms,
+            "theoretical_fast_accept_saving_ms": saving_ms,
+            "first_candidate_was_empty": False,
+            "intermediate_distinct_candidate_count": len(trial["distinct"]),
+            "first_candidate_digest": trial["digest"],
+            "final_digest": _audit_digest(candidate.text),
+        }
+        self._audit_pending = record
+        self._audit_recent.append(record)
+        self._audit_savings.append(first_to_accept_ms)
+        stats = self._audit_stats
+        stats.transitions_total += 1
+        if matches:
+            stats.first_matches_final += 1
+        else:
+            stats.first_differs_from_final += 1
+        bucket = audit_confidence_bucket(trial["confidence"])
+        entry = stats.confidence_buckets.setdefault(
+            bucket, {"count": 0, "matches": 0, "saving_ms_sum": 0.0}
+        )
+        entry["count"] += 1
+        if matches:
+            entry["matches"] += 1
+        entry["saving_ms_sum"] = round(entry["saving_ms_sum"] + saving_ms, 3)
+        self._audit_trial = None
+
+    def _audit_note_clear(self) -> None:
+        self._audit_stats.clear_transitions += 1
+        self._audit_trial = None
 
     @property
     def consensus_required(self) -> int:

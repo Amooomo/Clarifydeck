@@ -424,6 +424,24 @@ class OCRDiagnostic:
                 ),
                 flush=True,
             )
+        # Phase 2N.4: one concise first-candidate reliability line per accepted
+        # transition (stderr only; no text content, digests/lengths only).
+        for record in self._multi_region_coordinator.drain_audit():
+            print(
+                "[stabilizer-audit] region={region} frame={frame} "
+                "first_conf={conf} candidate_count={count} first_matches_final={matches} "
+                "distinct_candidates={distinct} first_to_accept_ms={first_to} saving_ms={saving}".format(
+                    region=record.get("region_id"),
+                    frame=record.get("frame_seq"),
+                    conf=record.get("first_candidate_confidence"),
+                    count=record.get("candidate_count_until_accept"),
+                    matches=1 if record.get("first_matches_final") else 0,
+                    distinct=record.get("intermediate_distinct_candidate_count"),
+                    first_to=record.get("first_candidate_to_accept_ms"),
+                    saving=record.get("theoretical_fast_accept_saving_ms"),
+                ),
+                flush=True,
+            )
 
     def _correlate(self, result, timings: dict) -> None:
         """Bounded recent table: sequence / ocr_wall_ms / det_ms / capture timing."""
@@ -810,6 +828,12 @@ class OCRDiagnostic:
                 print(f"[ocr-correlation] {self.correlations}")
             if self.stabilizer is not None:
                 print(f"[ocr-stable] stats={self.stabilizer.stats().__dict__}")
+            if self._multi_region_enabled and self._multi_region_coordinator is not None:
+                print(
+                    f"[stabilizer-audit-summary] {self._multi_region_coordinator.audit_summary()}"
+                )
+            elif self.stabilizer is not None:
+                print(f"[stabilizer-audit-summary] {self.stabilizer.audit_summary()}")
             if self.gate is not None:
                 gate_stats = self.gate.stats()
                 payload = dict(gate_stats.__dict__)

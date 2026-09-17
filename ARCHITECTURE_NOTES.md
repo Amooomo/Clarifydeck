@@ -2090,6 +2090,47 @@ Status: LOCAL PASS / DEVICE LATENCY MEASUREMENT PENDING
 - no new dependency, no persisted data, no new RPC/QAM UI; instrumentation is
   bounded and only fires on changed text.
 
+## Phase 2N.3 — device latency result
+
+Status: DEVICE MEASUREMENT (partial)
+
+- typical `frame_age_at_render_ms` ≈ 0.55–0.82 s; OCR (`ocr_ms`) ≈ 0.57–0.77 s
+  dominates the accepted-frame path; `decode_ms` ≈ 31–37 ms; `roi_ms` < 1 ms;
+  `capture_age_at_ocr_start_ms` ≈ 33–38 ms (no meaningful queue backlog in the
+  typical samples); `stable_text_to_send_ms` ≈ 1 ms; `renderer_ms` ≈ 2–5 ms.
+- `stabilizer_accept_ms` ≈ 0.73–1.03 s observed; it spans first-candidate to
+  acceptance across OCR cycles and is not additive with `worker_total_ms`.
+- 2N.3.1 hotfix: the renderer used `time.monotonic()` without importing `time`,
+  crashing the renderer on the first latency-enabled text update
+  (`NameError`); fixed by adding `import time` (`bcedd617`). Regression test
+  `scripts/test_renderer_latency_hotfix.py` executes the latency path.
+
+## Phase 2N.4 — Stabilizer First-Candidate Reliability Audit
+
+Status: LOCAL PASS / DEVICE RELIABILITY MEASUREMENT PENDING
+
+- observational audit only; `consensus_required=2`, `history_size=3`,
+  `min_line_confidence=0.70`, `stale_timeout_sec=2.0`, exact-string and clear
+  semantics are unchanged, and no live fast-accept path exists.
+- `OCRStabilizer` tracks a transition trial (first eligible candidate after the
+  current Stable Text) and, on each acceptance, records: region_id, frame seq,
+  first/accepted candidate seq, candidate count until accept, first/accepted
+  confidence, `first_matches_final`, lengths, `first_candidate_to_accept_ms`,
+  `theoretical_fast_accept_saving_ms`, distinct-candidate count, and short
+  process-local digests (no OCR text is logged). Bounded: 16 recent records, 64
+  savings samples, aggregate counters with confidence buckets
+  (0.70–0.79 / 0.80–0.89 / 0.90–0.94 / 0.95–1.00).
+- confidence semantics: the candidate confidence is the existing
+  minimum-line-confidence already used for eligibility (no new formula).
+- clear transitions are counted separately and excluded from the
+  text-replacement reliability metric; repeated already-stable text never starts
+  a trial; trial state resets on acceptance, clear, `reset()` (session), and
+  region removal; state is per `region_id`.
+- output: `scripts/ocr_test.py` prints one `[stabilizer-audit]` line per accepted
+  transition (stderr) and a `[stabilizer-audit-summary]` aggregate on shutdown.
+- no capture/OCR/stabilizer-behavior/transport/overlay/renderer changes; no new
+  dependency; no persisted telemetry; no QAM UI.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so
