@@ -633,6 +633,7 @@ class ProductionLaunchPathTest(unittest.TestCase):
         engine._role = "leader"
         engine._producer = None
         engine._ocr_worker = manager
+        engine.roi_config_path = lambda: settings / "recognition_roi.json"  # type: ignore[method-assign]
         result = engine.start_ocr_worker()
         self.assertTrue(result["ok"])
         self.assertEqual(result["state"], "RUNNING")
@@ -642,7 +643,13 @@ class ProductionLaunchPathTest(unittest.TestCase):
         model_index = command.index("--model-dir")
         self.assertEqual(command[model_index + 1], str(root / "models" / "ppocrv6"))
         roi_index = command.index("--roi-config")
-        self.assertEqual(command[roi_index + 1], str(settings / "recognition_roi.json"))
+        # Phase 2M.2D.1: the worker resolves the active Region Profile (the same
+        # source the overlay uses), not the frozen legacy recognition_roi.json.
+        active_profile = engine.active_region_config_path()
+        self.assertIsNotNone(active_profile)
+        self.assertEqual(Path(command[roi_index + 1]), active_profile)
+        self.assertEqual(active_profile.parent, settings / "region_profiles")
+        self.assertTrue(active_profile.is_file())
         self.assertNotIn("None", command)
         manager.stop()
 

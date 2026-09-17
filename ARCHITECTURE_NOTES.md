@@ -1967,7 +1967,11 @@ Device validation (from `a61c4b673009ec4273437aa0c8ae3b84a85af2a4`):
 
 ## Phase 2M.2D — Per-Region Presentation Persistence
 
-Status: LOCAL PASS / DEVICE RETEST PENDING
+Status: DEVICE FAIL / REMEDIATION REQUIRED
+
+Device reproduction (from `ff7ce16681df97b913f6f45acd40089935644dd7`):
+- Persistent Overlay OFF -> ON -> Stop OCR -> Start OCR
+- Stable Text present; Region Preview present; region text absent
 
 - new file `<settings>/overlay_presentation.json`, separate from
   `recognition_roi.json` and the `region_profiles/` files (which stay geometry/
@@ -2011,6 +2015,43 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
   no-replay, no scrolling, no touch/input.
 - roadmap: 2M.2E Direct Touch Input Probe -> 2M.2F Direct Touch Scroll only if
   the probe proves safe.
+
+## Phase 2M.2D.1 — Persistent Overlay Re-enable Text Delivery Recovery
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+- proven root cause (region-source divergence, introduced by 2M.2C): the overlay
+  resolves its per-region layout from the authoritative active Region Profile
+  (`region_profiles/profile_<uuid>.json`), but the OCR worker still resolved
+  regions from the frozen legacy `recognition_roi.json` (`scripts/ocr_test.py
+  ._resolve_effective_regions` via `recognition_roi.get_store().path`). Once the
+  active profile diverges from the legacy file (e.g. after a Region edit or a new
+  Region Set), the worker emits v2 events whose `region_id`s are absent from the
+  overlay layout, so `MainLoopOverlayDelivery._deliver_region` silently drops
+  them as `actions_dropped_unknown_region`. Result: Stable Text present, Preview
+  present, region text absent. The overlay OFF/ON toggle in the report was not
+  causal; the divergence was.
+- delivery/manager audit (negative evidence): the coordinator session reset,
+  `set_session`, per-region pending, `text_enabled`, `_is_running`, and the
+  renderer `set_region_text` IPC all behave correctly across OFF -> ON ->
+  Stop/Start. No text-based duplicate suppression exists in the delivery path;
+  transport `event_seq` protection and the coordinator `stale_or_duplicate`
+  guard are preserved unchanged.
+- fix: at each explicit OCR Start, the engine passes the active Region Profile
+  file to the worker as `--roi-config` (`ClarifyDeckEngine
+  .active_region_config_path()` -> `OCRWorkerManager.start(roi_config=...)`), so
+  the worker and the overlay resolve the SAME authoritative region source and the
+  same `region_id`s. The Start-time snapshot semantics are preserved (both sides
+  resolve once at Start; QAM edits apply on the next Start). The legacy
+  `recognition_roi.json` is no longer passed to the worker.
+- invariant restored: Persistent Overlay may clear rendered text, but it never
+  poisons future fresh Stable Text delivery. OFF clears text; ON alone does not
+  replay; a new OCR session's fresh accepted v2 event (same or changed string)
+  renders again for one or more regions, using restored style/font.
+- unchanged: no OCR recognition/model/stabilizer/change-gate/capture change; no
+  transport v2 schema change; no Region Profile/RecognitionRegion schema change;
+  no renderer/`overlay/renderer.py` change; no `ShapeInput`/touch/scroll work; no
+  presentation-persistence change; Preview independence preserved.
 
 ## Phase 2C.2 Wayland environment
 

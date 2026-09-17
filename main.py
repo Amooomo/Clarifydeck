@@ -977,7 +977,20 @@ class ClarifyDeckEngine:
         # for the session (QAM edits apply on the next explicit Start).
         if self._overlay_delivery is not None:
             self._overlay_delivery.set_region_layout(self._resolve_region_layout())
+        # Phase 2M.2D.1: the worker must resolve the SAME authoritative region
+        # source as the overlay (the active Region Profile), otherwise its
+        # region_ids diverge from the overlay layout and fresh region text is
+        # dropped as an unknown region. The legacy recognition_roi.json is a
+        # frozen migration artifact and is no longer authoritative.
+        roi_config = self.active_region_config_path()
+        if roi_config is not None:
+            return manager.start(fps=fps, change_gate=change_gate, roi_config=str(roi_config))
         return manager.start(fps=fps, change_gate=change_gate)
+
+    def active_region_config_path(self) -> Optional[Path]:
+        """Authoritative active Region Profile file (same source the overlay uses)."""
+        store = self._region_store()
+        return Path(store.path) if store is not None else None
 
     def _resolve_region_layout(self) -> dict:
         if recognition_regions is None:
