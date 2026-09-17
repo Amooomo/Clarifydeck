@@ -1716,6 +1716,33 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
   preserved. OCR/transport/change-gate/capture semantics unchanged.
 - font-size/scroll UX is deferred to Phase 2M.2.
 
+## Phase 2M.1.1 — Short-Region Glyph Render Guard
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+- real device reproduction at `h=0.04`: Region 1 stable text was recognized and
+  its text block existed, but no glyph was drawn, while Region 2 (`h=0.13`)
+  rendered normally. Changing only Region 1 to `h=0.08` (Apply / Stop OCR /
+  Start OCR) made its text reappear, isolating a short-region rendering
+  boundary rather than OCR, transport, region config, or multi-region delivery.
+- root cause: `protocol.clip_lines(lines, line_height, max_height)` computed
+  `int(max_height // line_height)`. At `h=0.04` on 1280x800 the region is 32px
+  tall; with 8px padding the drawable inner height is 16px, below the 26px
+  nominal line height, so the visible-line capacity was `0` and the glyph loop
+  received an empty list even though the region was drawable.
+- fix: `clip_lines` now returns at least one line whenever the drawable height
+  is positive (`max_height > 0`) and the line height is valid, regardless of
+  whether a full nominal line fits. A region with no drawable area
+  (`max_height <= 0`) or an invalid line height still returns no lines.
+- minimum one visible line only when the drawable area is positive; the renderer
+  keeps its existing cairo clip rectangle at the exact configured region bounds,
+  so the single line is vertically clipped and no glyph leaks into adjacent
+  regions.
+- normal-height regions are unchanged: capacity for regions that already fit N
+  full lines is still exactly N; only the zero-line edge case changes.
+- no OCR / transport / change-gate / capture / region-persistence / renderer
+  lifecycle / preview lifecycle changes; frontend untouched.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

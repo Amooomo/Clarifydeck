@@ -176,7 +176,17 @@ def wrap_text(text: str, max_width: float, measure: Any) -> list[str]:
 
 
 def clip_lines(lines: list[str], line_height: float, max_height: float) -> list[str]:
-    """Vertical clip: keep only whole lines that fit inside ``max_height``."""
+    """Vertical clip: keep whole lines that fit inside ``max_height``.
+
+    A positive drawable height always yields at least one line, even when it is
+    shorter than ``line_height``: a short but drawable region must still render
+    text. The glyphs stay clipped to the exact region rectangle by the caller, so
+    nothing leaks outside it. No drawable area (``max_height <= 0``) or an
+    invalid line height yields no lines.
+    """
     if line_height <= 0 or max_height <= 0:
         return []
-    return lines[: int(max_height // line_height)]
+    capacity = int(max_height // line_height)
+    if capacity < 1:
+        capacity = 1
+    return lines[:capacity]

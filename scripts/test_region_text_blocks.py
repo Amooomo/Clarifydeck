@@ -218,6 +218,80 @@ class ProtocolTextTest(unittest.TestCase):
         self.assertIsNone(protocol.sanitize_region_text("A", {"x": 5, "y": 0.2, "w": 0.3, "h": 0.1}, "hi"))
 
 
+class ShortRegionRenderGuardTest(unittest.TestCase):
+    """Phase 2M.1.1: a short but drawable region still renders one clipped line.
+
+    Uses the renderer's region-text constants (font 20px, line height 1.3x,
+    padding 8px) on a Steam Deck-like 1280x800 surface. Pure protocol-level
+    checks: no X11, no renderer process.
+    """
+
+    SURFACE_W = 1280
+    SURFACE_H = 800
+    FONT_SIZE = 20.0
+    LINE_H = FONT_SIZE * 1.3  # 26px
+    PADDING = 8.0
+
+    def _inner_height(self, h: float) -> float:
+        _, _, _, px_h = protocol.preview_pixel_rect(
+            {"x": 0.0, "y": 0.0, "w": 0.5, "h": h}, self.SURFACE_W, self.SURFACE_H
+        )
+        return px_h - 2 * self.PADDING
+
+    def test_t1_confirmed_h004_renders_at_least_one_line(self) -> None:
+        inner_h = self._inner_height(0.04)  # 32px - 16px = 16px < 26px
+        self.assertGreater(inner_h, 0.0)
+        self.assertLess(inner_h, self.LINE_H)
+        lines = protocol.wrap_text("PRESS START", 200.0, lambda s: len(s) * 14.0)
+        visible = protocol.clip_lines(lines, self.LINE_H, inner_h)
+        self.assertGreaterEqual(len(visible), 1)
+        self.assertEqual(visible[0], "PRESS START")
+
+    def test_t2_normal_heights_unchanged(self) -> None:
+        # h=0.08 -> 64px -> inner 48px -> exactly one full line
+        self.assertEqual(
+            protocol.clip_lines(["a", "b", "c"], self.LINE_H, self._inner_height(0.08)),
+            ["a"],
+        )
+        # h=0.13 -> 104px -> inner 88px -> three full lines
+        self.assertEqual(
+            protocol.clip_lines(["a", "b", "c", "d"], self.LINE_H, self._inner_height(0.13)),
+            ["a", "b", "c"],
+        )
+
+    def test_t3_zero_or_invalid_drawable_area_forces_no_line(self) -> None:
+        self.assertEqual(protocol.clip_lines(["a", "b"], self.LINE_H, 0.0), [])
+        self.assertEqual(protocol.clip_lines(["a", "b"], self.LINE_H, -4.0), [])
+        self.assertEqual(protocol.clip_lines(["a", "b"], 0.0, 100.0), [])
+        self.assertEqual(protocol.clip_lines([], self.LINE_H, 5.0), [])
+
+    def test_t4_short_region_draws_exactly_one_line(self) -> None:
+        # Never more than the single allowed line for a sub-line region: the
+        # renderer keeps the cairo clip at the exact configured region rect.
+        visible = protocol.clip_lines(["one", "two", "three"], self.LINE_H, self._inner_height(0.04))
+        self.assertEqual(visible, ["one"])
+        rect = protocol.preview_pixel_rect(
+            {"x": 0.14, "y": 0.76, "w": 0.13, "h": 0.04}, self.SURFACE_W, self.SURFACE_H
+        )
+        self.assertAlmostEqual(rect[0], 0.14 * self.SURFACE_W)
+        self.assertAlmostEqual(rect[1], 0.76 * self.SURFACE_H)
+        self.assertAlmostEqual(rect[2], 0.13 * self.SURFACE_W)
+        self.assertAlmostEqual(rect[3], 0.04 * self.SURFACE_H)
+
+    def test_t5_short_and_normal_regions_independent(self) -> None:
+        short_visible = protocol.clip_lines(["s1", "s2"], self.LINE_H, self._inner_height(0.04))
+        normal_visible = protocol.clip_lines(["n1", "n2", "n3", "n4"], self.LINE_H, self._inner_height(0.13))
+        self.assertEqual(short_visible, ["s1"])
+        self.assertEqual(normal_visible, ["n1", "n2", "n3"])
+
+    def test_t6_cjk_short_region_renders_one_line(self) -> None:
+        text = "九州一番星店长"
+        lines = protocol.wrap_text(text, 200.0, lambda s: len(s) * 14.0)
+        visible = protocol.clip_lines(lines, self.LINE_H, self._inner_height(0.04))
+        self.assertEqual(len(visible), 1)
+        self.assertEqual("".join(visible), text)
+
+
 class SpyDelivery:
     def __init__(self):
         self.sessions = []
