@@ -3,7 +3,7 @@
 // source of truth. Saving never starts/stops/restarts OCR or the renderer, and
 // changes apply on the next explicit OCR start.
 
-import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
+import { ButtonItem, Dropdown, PanelSection, PanelSectionRow } from "@decky/ui";
 import { callable, useQuickAccessVisible } from "@decky/api";
 import { type CSSProperties, useEffect, useRef, useState } from "react";
 import {
@@ -45,6 +45,23 @@ const regionConfigGet = callable<[appId: string | null], RegionConfigPayload>("r
 const regionConfigSet = callable<[regions: RegionDraft[], appId: string | null], RegionConfigPayload>("region_config_set");
 const regionConfigReset = callable<[appId: string | null], RegionConfigPayload>("region_config_reset");
 
+// Phase 2M.2C Region Profile ("Region Set") management. Each Region Set is an
+// independently persisted Region JSON file selected by stable profile_id.
+type RegionProfileInfo = { profile_id: string; label: string };
+type RegionProfilesPayload = {
+  ok?: boolean;
+  error?: string;
+  detail?: string;
+  active_profile_id?: string;
+  profiles?: RegionProfileInfo[];
+  max_profiles?: number;
+  last_error?: string | null;
+};
+const regionProfilesGet = callable<[], RegionProfilesPayload>("region_profiles_get");
+const regionProfileSelect = callable<[profileId: string], RegionProfilesPayload>("region_profile_select");
+const regionProfileAdd = callable<[], RegionProfilesPayload>("region_profile_add");
+const regionProfileDelete = callable<[profileId: string], RegionProfilesPayload>("region_profile_delete");
+
 type OverlayControlResult = { ok?: boolean; error?: string; detail?: string; state?: string; renderer_pid?: number | null };
 
 // Explicit, UI-local (not persisted) region-preview control. Reuses the proven
@@ -83,6 +100,9 @@ export function RegionEditorSection() {
   const [drafts, setDrafts] = useState<RegionDraft[]>([]);
   const [configured, setConfigured] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [profiles, setProfiles] = useState<RegionProfileInfo[]>([]);
+  const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
+  const [maxProfiles, setMaxProfiles] = useState(8);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [previewOn, setPreviewOn] = useState(false);
@@ -105,7 +125,15 @@ export function RegionEditorSection() {
     );
   };
 
-  const load = async () => {
+  const applyProfilesPayload = (result: RegionProfilesPayload) => {
+    setProfiles(result.profiles ?? []);
+    setActiveProfileId(result.active_profile_id ?? null);
+    if (typeof result.max_profiles === "number") {
+      setMaxProfiles(result.max_profiles);
+    }
+  };
+
+  const loadActiveRegions = async () => {
     try {
       const result = await regionConfigGet(scopeAppId("global", CURRENT_APP_ID));
       if (mounted.current) {
@@ -117,6 +145,26 @@ export function RegionEditorSection() {
         setError(`Could not load regions: ${String(err)}`);
       }
     }
+  };
+
+  const load = async () => {
+    try {
+      const result = await regionProfilesGet();
+      if (!mounted.current) {
+        return;
+      }
+      if (result.ok === false) {
+        setError(result.detail || result.error || "Could not load Region Sets");
+        return;
+      }
+      applyProfilesPayload(result);
+    } catch (err) {
+      if (mounted.current) {
+        setError(`Could not load Region Sets: ${String(err)}`);
+      }
+      return;
+    }
+    await loadActiveRegions();
   };
 
   useEffect(() => {
@@ -281,6 +329,89 @@ export function RegionEditorSection() {
     setDrafts((current) => removeRegion(current, selected.region_id));
   };
 
+  // Region Set (profile) operations persist immediately. They never start or
+  // restart OCR / the renderer; a running OCR session keeps its Start snapshot.
+  const selectProfile = async (profileId: string) => {
+    if (!profileId || profileId === activeProfileId) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const result = await regionProfileSelect(profileId);
+      if (mounted.current) {
+        if (result.ok === false) {
+          setError(result.detail || result.error || "Select Region Set failed");
+        } else {
+          applyProfilesPayload(result);
+          await loadActiveRegions();
+        }
+      }
+    } catch (err) {
+      if (mounted.current) {
+        setError(`Select Region Set failed: ${String(err)}`);
+      }
+    } finally {
+      if (mounted.current) {
+        setBusy(false);
+      }
+    }
+  };
+
+  const addProfile = async () => {
+    if (profiles.length >= maxProfiles) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const result = await regionProfileAdd();
+      if (mounted.current) {
+        if (result.ok === false) {
+          setError(result.detail || result.error || "Add Region Set failed");
+        } else {
+          applyProfilesPayload(result);
+          await loadActiveRegions();
+        }
+      }
+    } catch (err) {
+      if (mounted.current) {
+        setError(`Add Region Set failed: ${String(err)}`);
+      }
+    } finally {
+      if (mounted.current) {
+        setBusy(false);
+      }
+    }
+  };
+
+  const deleteProfile = async () => {
+    if (!activeProfileId || profiles.length <= 1) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const result = await regionProfileDelete(activeProfileId);
+      if (mounted.current) {
+        if (result.ok === false) {
+          setError(result.detail || result.error || "Delete Region Set failed");
+        } else {
+          applyProfilesPayload(result);
+          await loadActiveRegions();
+        }
+      }
+    } catch (err) {
+      if (mounted.current) {
+        setError(`Delete Region Set failed: ${String(err)}`);
+      }
+    } finally {
+      if (mounted.current) {
+        setBusy(false);
+      }
+    }
+  };
+
   const apply = async () => {
     const message = validateRegions(drafts);
     if (message) {
@@ -329,6 +460,11 @@ export function RegionEditorSection() {
   };
 
   const scopes = scopeOptions(CURRENT_APP_ID !== null);
+  const profileOptions = profiles.map((profile) => ({ data: profile.profile_id, label: profile.label }));
+  const regionOptions = drafts.map((region, index) => ({
+    data: region.region_id,
+    label: regionLabel(region, index, primaryId),
+  }));
 
   return (
     <PanelSection title="Recognition Regions">
@@ -347,30 +483,64 @@ export function RegionEditorSection() {
         </div>
       </PanelSectionRow>
       <PanelSectionRow>
-        <div style={listStyle}>
-          {drafts.length === 0 ? <div style={hintStyle}>No regions. Add one below.</div> : null}
-          {drafts.map((region, index) => (
-            <ButtonItem
-              key={region.region_id}
-              layout="below"
-              onClick={() => setSelectedId(region.region_id)}
-            >
-              {region.region_id === selectedId ? "[x] " : "[ ] "}
-              {regionLabel(region, index, primaryId)}
-            </ButtonItem>
-          ))}
+        <div style={hintStyle}>Region Set</div>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <div style={selectorRowStyle}>
+          <Dropdown
+            rgOptions={profileOptions}
+            selectedOption={activeProfileId}
+            disabled={busy || profileOptions.length === 0}
+            onChange={(option) => void selectProfile(option.data)}
+          />
+          <ButtonItem
+            layout="below"
+            disabled={busy || profiles.length >= maxProfiles}
+            onClick={() => void addProfile()}
+          >
+            +
+          </ButtonItem>
+          <ButtonItem
+            layout="below"
+            disabled={busy || profiles.length <= 1}
+            onClick={() => void deleteProfile()}
+          >
+            -
+          </ButtonItem>
         </div>
       </PanelSectionRow>
       <PanelSectionRow>
-        <div style={rowActionsStyle}>
-          <ButtonItem layout="below" disabled={!canAddRegion(drafts) || busy} onClick={addRegion}>
-            Add region
+        <div style={hintStyle}>Region</div>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <div style={selectorRowStyle}>
+          <Dropdown
+            rgOptions={regionOptions}
+            selectedOption={selectedId}
+            disabled={busy || regionOptions.length === 0}
+            onChange={(option) => setSelectedId(option.data)}
+          />
+          <ButtonItem
+            layout="below"
+            disabled={!canAddRegion(drafts) || busy}
+            onClick={addRegion}
+          >
+            +
           </ButtonItem>
-          <ButtonItem layout="below" disabled={!selected || busy} onClick={removeSelected}>
-            Remove selected
+          <ButtonItem
+            layout="below"
+            disabled={!selected || busy}
+            onClick={removeSelected}
+          >
+            -
           </ButtonItem>
         </div>
       </PanelSectionRow>
+      {drafts.length === 0 ? (
+        <PanelSectionRow>
+          <div style={hintStyle}>No regions. Add one with + above.</div>
+        </PanelSectionRow>
+      ) : null}
       <PanelSectionRow>
         <div style={rowActionsStyle}>
           <ButtonItem
@@ -541,9 +711,11 @@ const rowActionsStyle: CSSProperties = {
   width: "100%",
 };
 
-const listStyle: CSSProperties = {
+const selectorRowStyle: CSSProperties = {
+  alignItems: "center",
   display: "grid",
   gap: "6px",
+  gridTemplateColumns: "1fr 52px 52px",
   width: "100%",
 };
 

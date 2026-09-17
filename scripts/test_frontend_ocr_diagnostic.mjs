@@ -642,6 +642,59 @@ check("font: no scroll/touch controls", () => {
   }
 });
 
+// -- Phase 2M.2C Region Profile ("Region Set") management + dropdown CRUD -------
+
+check("profiles: RPCs declared once", () => {
+  for (const needle of [
+    "region_profiles_get",
+    "region_profile_select",
+    "region_profile_add",
+    "region_profile_delete",
+  ]) {
+    assert.equal(countOccurrences(regionComponentSrc, `"${needle}"`), 1, needle);
+  }
+});
+check("profiles: Region Set dropdown uses profile_id", () => {
+  assert.ok(regionComponentSrc.includes("profileOptions"));
+  assert.ok(regionComponentSrc.includes("data: profile.profile_id"));
+  assert.ok(regionComponentSrc.includes("selectedOption={activeProfileId}"));
+});
+check("profiles: upper +/- controls with guards", () => {
+  assert.ok(regionComponentSrc.includes("onClick={() => void addProfile()}"));
+  assert.ok(regionComponentSrc.includes("onClick={() => void deleteProfile()}"));
+  assert.ok(regionComponentSrc.includes("profiles.length <= 1"));
+  assert.ok(regionComponentSrc.includes("profiles.length >= maxProfiles"));
+});
+check("profiles: switch reloads regions and selects fallback", () => {
+  assert.ok(regionComponentSrc.includes("regionProfileSelect(profileId)"));
+  assert.ok(regionComponentSrc.includes("await loadActiveRegions()"));
+});
+check("regions: dropdown uses region_id", () => {
+  assert.ok(regionComponentSrc.includes("regionOptions"));
+  assert.ok(regionComponentSrc.includes("data: region.region_id"));
+  assert.ok(regionComponentSrc.includes("selectedOption={selectedId}"));
+});
+check("regions: lower +/- controls", () => {
+  assert.ok(regionComponentSrc.includes("onClick={addRegion}"));
+  assert.ok(regionComponentSrc.includes("onClick={removeSelected}"));
+});
+check("regions: add/delete selection fallback", () => {
+  assert.ok(regionComponentSrc.includes("setSelectedId(draft.region_id)"));
+  assert.ok(regionComponentSrc.includes("nextSelectionAfterRemove"));
+});
+check("regions: draft Apply writes active profile only", () => {
+  assert.equal(countOccurrences(regionComponentSrc, "regionConfigSet("), 1);
+});
+check("profiles: no persistence/scroll/touch UI", () => {
+  for (const needle of ["overlay_presentation", "localStorage", "scroll_offset", "touch"]) {
+    assert.equal(regionComponentSrc.includes(needle), false, needle);
+  }
+});
+check("profiles: style and font selectors preserved", () => {
+  assert.ok(regionComponentSrc.includes("regionPanelStyleSet(selectedId, style)"));
+  assert.ok(regionComponentSrc.includes("regionFontSizeSet(selectedId, size)"));
+});
+
 if (process.exitCode) {
   console.error(`\nfrontend OCR diagnostic harness FAILED (${passed} passed)`);
 } else {

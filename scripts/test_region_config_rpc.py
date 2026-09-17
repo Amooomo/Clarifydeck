@@ -88,14 +88,17 @@ class RegionConfigRpcTest(unittest.TestCase):
         self.assertEqual(result["configured_regions"], [])
         self.assertEqual(result["effective_regions"], [])
 
-    def test_r5_legacy_v1_read_no_rewrite(self) -> None:
+    def test_r5_legacy_v1_migrates_to_active_profile_no_rewrite(self) -> None:
         write_v1(self.path)
         before = self.path.read_bytes()
         result = self.engine.region_config_get(None)
         self.assertTrue(result["ok"])
-        self.assertFalse(result["configured"])
-        self.assertEqual(len(result["effective_regions"]), 1)
-        self.assertAlmostEqual(result["effective_regions"][0]["x"], 0.08)
+        # First access bootstraps one profile preserving the legacy region.
+        self.assertTrue(result["configured"])
+        self.assertEqual(len(result["configured_regions"]), 1)
+        self.assertAlmostEqual(result["configured_regions"][0]["x"], 0.08)
+        self.assertEqual(result["configured_regions"][0]["region_id"], rr.LEGACY_REGION_ID)
+        # The legacy migration source is never rewritten (no dual-write).
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_r6_explicit_edit_adopts_v2(self) -> None:
@@ -140,15 +143,21 @@ class RegionConfigRpcTest(unittest.TestCase):
         self.assertFalse(result["configured"])
 
     def test_atomic_persistence_and_stable_ids(self) -> None:
-        self.engine.region_config_set([_region("a"), _region("b", x=0.5, enabled=False, name="Dialogue")], None)
-        leftovers = [p.name for p in self.path.parent.iterdir() if p.name.endswith(".tmp")]
+        result = self.engine.region_config_set(
+            [_region("a"), _region("b", x=0.5, enabled=False, name="Dialogue")], None
+        )
+        self.assertTrue(result["ok"])
+        profile_path = Path(result["config_path"])
+        leftovers = [p.name for p in profile_path.parent.iterdir() if p.name.endswith(".tmp")]
         self.assertEqual(leftovers, [])
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        payload = json.loads(profile_path.read_text(encoding="utf-8"))
         self.assertEqual(payload["version"], 2)
         regions = payload["global"]["regions"]
         self.assertEqual([r["region_id"] for r in regions], ["a", "b"])
         self.assertFalse(regions[1]["enabled"])
         self.assertEqual(regions[1]["name"], "Dialogue")
+        # The legacy recognition_roi.json is never created/updated after migration.
+        self.assertFalse(self.path.exists())
 
 
 if __name__ == "__main__":

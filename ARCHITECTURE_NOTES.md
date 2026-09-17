@@ -1804,7 +1804,18 @@ Device validation (from `69ef7807ec7041505be3aa441a3fa584b35b84cd`):
 
 ## Phase 2M.2B — Per-Region Font Size
 
-Status: LOCAL PASS / DEVICE RETEST PENDING
+Status: DEVICE PASS / CLOSED
+
+Device validation (from `15f96a5427fa9018aa081436d3a4bb98cc6eb2f1`):
+- per-region font sizes changed live and rewrapped visible text
+- two regions used different font sizes simultaneously
+- font changes stayed independent from panel style
+- short `h=0.04` region still rendered at small/default/large sizes
+- clear removed only the target region text/panel
+- Preview + panels + custom sizes coexisted
+- Persistent Overlay no-replay behavior remained
+- no OCR restart from font changes; runtime size reset on restart as designed
+- no new Python Exception / renderer lifecycle regression
 
 - per-region runtime font size, keyed by stable `region_id` (never
   index/label/order), default `20`. Runtime/in-memory only:
@@ -1838,6 +1849,61 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
   schema change, no new settings file. No OCR/stabilizer/change-gate/transport/
   capture changes; no scrolling; no touch/input work; panel alpha and styles
   unchanged; renderer ownership and the no-replay lifecycle unchanged.
+
+## Phase 2M.2C — Region Profile JSON Management + Dropdown Region CRUD
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+- Region Sets ("Region Profiles") are independently persisted JSON files under
+  `<settings>/region_profiles/`. New module `capture/region_profiles.py`
+  (`RegionProfileStore`, pure stdlib) owns the directory, index, bootstrap,
+  migration and CRUD; each profile file reuses the proven v2 RecognitionRegion
+  schema via `RegionConfigStore` (no schema duplication/change).
+- storage layout: `region_profiles/index.json` + `region_profiles/
+  profile_<profile_id>.json`. Index schema v1:
+  `{version, active_profile_id, next_label_number, profiles:[{profile_id,
+  label, file}]}`. Index is authoritative; orphan files are ignored, never
+  auto-imported. Index validation rejects unsafe filenames (separators, `..`,
+  absolute paths), duplicate ids/files, bad labels, and > `MAX_REGION_PROFILES`
+  (16). `profile_id` is a stable UUID and the only identity; display order/label
+  are never identity.
+- bootstrap/migration: when `index.json` is absent, one profile is created. A
+  valid legacy `recognition_roi.json` (v2 or v1) is imported once, preserving
+  geometry and existing `region_id` values exactly; otherwise the built-in
+  fallback region is used. After bootstrap the profile store is authoritative
+  and the legacy file is never written again (no dual-write) and is no longer
+  consulted as a resolution fallback layer. The legacy file is left on disk as a
+  rollback artifact (not deleted). A corrupt index is quarantined to
+  `index.corrupt-<stamp>.json` (evidence preserved) and safely rebuilt; a
+  missing/corrupt profile is skipped and a valid remaining profile (or a fresh
+  default) becomes active. All index/profile writes are atomic (temp + fsync +
+  `os.replace`) with `0700` dir / `0600` files where the platform permits.
+- backend API: `region_profiles_get()`, `region_profile_select(profile_id)`,
+  `region_profile_add()`, `region_profile_delete(profile_id)`. Add creates an
+  independent profile file first, then references it in the index; delete writes
+  a valid index without the target first, then unlinks (orphan tolerated).
+  Deleting the last profile is rejected (`cannot_delete_last_profile`). The
+  existing `region_config_get/set/reset` now operate on the active profile
+  (Region add/delete/edit stay draft + Apply, writing only the active profile).
+  New Regions get fresh globally-unique `region_id` UUIDs; `MAX_REGIONS = 8`
+  preserved.
+- QAM: a "Region Set" `Dropdown` (profile_id) with compact `+`/`-` and a
+  "Region" `Dropdown` (region_id) with compact `+`/`-`. Switching sets reloads
+  that set's Regions and discards unsaved drafts; profile add/delete/select
+  persist immediately, Region add/delete are draft operations committed by
+  Apply. Style/font selectors remain and are keyed by the new region_id.
+- OCR session semantics frozen: switching the active Region Set does NOT
+  hot-swap a running OCR worker. The worker keeps its Start-time region
+  snapshot; the next explicit Stop -> Start uses the newly active Region Set.
+  Profile operations never start/restart OCR, never start the renderer while
+  Preview is OFF, and never replay Stable Text. Preview ON reflects the selected
+  set's geometry.
+- no presentation persistence: style/font are still runtime-only; no
+  `overlay_presentation.json`. No scrolling, no touch/input, no renderer/
+  protocol rendering changes, no OCR/stabilizer/change-gate/transport/capture
+  changes.
+- roadmap: 2M.2D Presentation Persistence (style + font) -> 2M.2E Direct Touch
+  Input Probe -> 2M.2F Direct Touch Scroll only if the probe proves safe.
 
 ## Phase 2C.2 Wayland environment
 

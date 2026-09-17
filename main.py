@@ -45,7 +45,7 @@ except Exception:  # pragma: no cover - optional at import time
     LeaderAcquireResult = None  # type: ignore[assignment]
 
 try:
-    from capture import gamescope_capture, recognition_regions, recognition_roi
+    from capture import gamescope_capture, recognition_regions, recognition_roi, region_profiles
     from capture.errors import CaptureError
     from capture.latest_frame_queue import LatestFrameQueue
     from capture.producer import CaptureProducer
@@ -53,6 +53,7 @@ except Exception:  # pragma: no cover - optional at import time
     gamescope_capture = None  # type: ignore[assignment]
     recognition_roi = None  # type: ignore[assignment]
     recognition_regions = None  # type: ignore[assignment]
+    region_profiles = None  # type: ignore[assignment]
     LatestFrameQueue = None  # type: ignore[assignment]
     CaptureProducer = None  # type: ignore[assignment]
 
@@ -375,6 +376,7 @@ class ClarifyDeckEngine:
         self._roi_config: Optional[Any] = None
         self._roi_resolver: Optional[Any] = None
         self._region_config: Optional[Any] = None
+        self._region_profiles: Optional[Any] = None
         self._ocr_transport: Optional[Any] = None
         self._ocr_worker: Optional[Any] = None
         self._overlay_coordinator: Optional[Any] = None
@@ -970,8 +972,10 @@ class ClarifyDeckEngine:
         if recognition_regions is None:
             return {}
         try:
-            store = recognition_regions.RegionConfigStore(self.roi_config_path())
-            resolver = recognition_regions.RegionResolver(store, legacy_resolver=self._roi_resolver_obj())
+            store = self._region_store()
+            if store is None:
+                return {}
+            resolver = recognition_regions.RegionResolver(store)
             regions = resolver.resolve_effective_regions(None).regions
         except Exception:
             return {}
@@ -1008,6 +1012,9 @@ class ClarifyDeckEngine:
             return
         self._roi_config = recognition_roi.configure(Path(path))
         self._roi_resolver = recognition_roi.ActiveROIResolver(self._roi_config)
+
+    def region_profiles_path(self) -> Path:
+        return self.roi_config_path().parent / "region_profiles"
 
     def _roi_store(self) -> Optional[Any]:
         if recognition_roi is None:
@@ -1090,10 +1097,26 @@ class ClarifyDeckEngine:
 
     # -- Phase 2L.7 v2 RecognitionRegion config ----------------------------
 
+    def _profile_store(self) -> Optional[Any]:
+        if region_profiles is None:
+            return None
+        directory = self.region_profiles_path()
+        if self._region_profiles is None or Path(self._region_profiles.directory) != directory:
+            try:
+                self._region_profiles = region_profiles.RegionProfileStore(
+                    directory, legacy_path=self.roi_config_path()
+                )
+            except Exception:
+                return None
+        return self._region_profiles
+
     def _region_store(self) -> Optional[Any]:
         if recognition_regions is None:
             return None
-        path = self.roi_config_path()
+        profile_store = self._profile_store()
+        if profile_store is None:
+            return None
+        path = profile_store.active_profile_path()
         if self._region_config is None or Path(self._region_config.path) != path:
             try:
                 self._region_config = recognition_regions.RegionConfigStore(path)
@@ -1105,7 +1128,9 @@ class ClarifyDeckEngine:
         store = self._region_store()
         if store is None:
             return None
-        return recognition_regions.RegionResolver(store, legacy_resolver=self._roi_resolver_obj())
+        # The active Region Set is authoritative; the migrated legacy file is
+        # intentionally NOT consulted as a fallback layer anymore.
+        return recognition_regions.RegionResolver(store)
 
     @staticmethod
     def _region_source(store: Any, app_id: Optional[str]) -> str:
@@ -1162,6 +1187,49 @@ class ClarifyDeckEngine:
         except OSError as exc:
             return {"ok": False, "error": "config_write_failed", "detail": str(exc)}
         return self._region_payload(app_id)
+
+    # -- Phase 2M.2C Region Profile ("Region Set") management ---------------
+
+    def region_profiles_get(self) -> dict[str, Any]:
+        store = self._profile_store()
+        if store is None:
+            return {"ok": False, "error": "region_profiles_unavailable"}
+        return store.payload()
+
+    def region_profile_select(self, profile_id: str) -> dict[str, Any]:
+        store = self._profile_store()
+        if store is None:
+            return {"ok": False, "error": "region_profiles_unavailable"}
+        if not store.select(profile_id):
+            return {"ok": False, "error": "profile_not_found", "detail": str(profile_id)}
+        self._region_config = None
+        return store.payload()
+
+    def region_profile_add(self) -> dict[str, Any]:
+        store = self._profile_store()
+        if store is None:
+            return {"ok": False, "error": "region_profiles_unavailable"}
+        try:
+            result = store.add()
+        except CaptureError as exc:
+            return {"ok": False, "error": exc.code, "detail": str(exc)}
+        except OSError as exc:
+            return {"ok": False, "error": "config_write_failed", "detail": str(exc)}
+        self._region_config = None
+        return result
+
+    def region_profile_delete(self, profile_id: str) -> dict[str, Any]:
+        store = self._profile_store()
+        if store is None:
+            return {"ok": False, "error": "region_profiles_unavailable"}
+        try:
+            result = store.delete(profile_id)
+        except CaptureError as exc:
+            return {"ok": False, "error": exc.code, "detail": str(exc)}
+        except OSError as exc:
+            return {"ok": False, "error": "config_write_failed", "detail": str(exc)}
+        self._region_config = None
+        return result
 
     @staticmethod
     def _parse_region_set(regions: Any) -> Any:
@@ -1648,6 +1716,18 @@ class Plugin:
 
     async def region_config_reset(self, app_id: Optional[str] = None) -> dict[str, Any]:
         return get_engine().region_config_reset(app_id)
+
+    async def region_profiles_get(self) -> dict[str, Any]:
+        return get_engine().region_profiles_get()
+
+    async def region_profile_select(self, profile_id: str) -> dict[str, Any]:
+        return get_engine().region_profile_select(profile_id)
+
+    async def region_profile_add(self) -> dict[str, Any]:
+        return get_engine().region_profile_add()
+
+    async def region_profile_delete(self, profile_id: str) -> dict[str, Any]:
+        return get_engine().region_profile_delete(profile_id)
 
     async def get_ocr_transport_status(self) -> dict[str, Any]:
         return get_engine().ocr_transport_status()
