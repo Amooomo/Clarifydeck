@@ -1852,9 +1852,17 @@ Device validation (from `15f96a5427fa9018aa081436d3a4bb98cc6eb2f1`):
 
 ## Phase 2M.2C — Region Profile JSON Management + Dropdown Region CRUD
 
-Status: DEVICE FAIL / REMEDIATION IN PROGRESS
+Status: DEVICE PASS / CLOSED
 
-Device failures (from `79a5c6b7838d2d7321e6d8c2f3d13e5dc802b77d`):
+Device validation (from `a61c4b673009ec4273437aa0c8ae3b84a85af2a4`):
+- Region Set add/delete and independent JSON files work
+- last-Region-Set delete guard holds
+- profile switch does not restart OCR; the running session keeps its snapshot
+- next Stop/Start uses the selected Region Set
+- Region add/delete and MAX_REGIONS hold
+- no new Python Exception / renderer lifecycle regression
+
+Earlier device failures (from `79a5c6b7838d2d7321e6d8c2f3d13e5dc802b77d`):
 - oversized `+`/`-` controls beside Region Set and Region disrupted QAM use
 - a deleted Region Set display number was not reused (monotonic labels)
 - the Region dropdown did not actually select Region 2 (editor stayed on Region 1)
@@ -1913,7 +1921,16 @@ Device failures (from `79a5c6b7838d2d7321e6d8c2f3d13e5dc802b77d`):
 
 ## Phase 2M.2C.1 — Device Remediation
 
-Status: LOCAL PASS / DEVICE RETEST PENDING
+Status: DEVICE PASS / CLOSED
+
+Device validation (from `a61c4b673009ec4273437aa0c8ae3b84a85af2a4`):
+- compact `+`/`-` controls
+- smallest-free Region Set label reuse
+- fresh identity/data on a reused label
+- Region dropdown correctly selects non-Primary Regions
+- style/font follow the selected Region
+- Preview remains visible with a dropdown popup
+- no OCR/renderer lifecycle regression
 
 - F1 compact controls: the four `+`/`-` actions are now fixed 30x30px native
   buttons (`compactButtonStyle`) in a `minmax(0, 1fr) 30px 30px` grid, so the
@@ -1947,6 +1964,53 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
   profile semantics, atomic writes, Region CRUD, OCR Start-time snapshot, no
   replay, Preview default OFF, no presentation persistence, no scrolling, no
   touch/input, no renderer draw/ownership changes.
+
+## Phase 2M.2D — Per-Region Presentation Persistence
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+- new file `<settings>/overlay_presentation.json`, separate from
+  `recognition_roi.json` and the `region_profiles/` files (which stay geometry/
+  config only). New pure-stdlib module `overlay/presentation.py`
+  (`PresentationStore`). Schema v1:
+  `{"version": 1, "regions": {"<region_id>": {"style": "white_on_black",
+  "font_size": 20}}}`. The canonical `protocol` style values (lowercase) and the
+  `14..48` font range are reused; unknown extra fields are ignored.
+- identity is the globally-unique stable `region_id` only. Never keyed by
+  profile label, Region Set number, display index, `Region N`, or Primary. A
+  reused Region Set label gets a fresh region_id, so it never inherits the
+  deleted set's presentation.
+- persisted fields are exactly `style` and `font_size`. Defaults remain
+  `WHITE_ON_BLACK` / `20`; a missing entry (or missing file) uses defaults.
+- `OverlayManager(presentation_path=...)` loads at construction (state
+  restoration only: no OCR/renderer start, no Preview/overlay enable, no text
+  block, no Stable Text replay) and seeds `_region_style` / `_region_font_size`.
+  The existing `region_panel_style_get` / `region_font_size_get` return the
+  restored values.
+- explicit save: new RPC `region_appearance_save(region_id)` persists the
+  manager's current authoritative runtime style/font for that region. It never
+  starts/stops OCR or the renderer, never changes geometry/style/font, and never
+  creates a block. Live style/font edits are NOT auto-saved.
+- save is atomic (temp + fsync + `os.replace`, mode `0600`) and preserves every
+  other entry, including entries for regions in inactive/deleted profiles
+  (orphans). Save of one region never overwrites the others. Save failure is
+  surfaced (`presentation_write_failed`) without corrupting the previous file and
+  without rolling back runtime appearance.
+- safe load: missing file -> defaults, no file created; corrupt JSON /
+  unsupported version -> defaults + `last_error`, evidence preserved (never
+  overwritten on load); partially invalid entries -> valid entries load, invalid
+  ignored; deleted Region/Region Set entries are ignored safely (no GC in this
+  gate).
+- QAM: one compact "Save appearance" action on the selected Region (targets the
+  exact `region_id`). The style selector and font slider remain live; no
+  auto-save. The 2M.2C.1 compact `+`/`-` layout, Region dropdown selection, and
+  Preview/dropdown coexistence are unchanged.
+- unchanged: OCR/stabilizer/change-gate/transport, Region Profile schema,
+  RecognitionRegion schema, renderer draw path, panel alpha/styles, font range/
+  line-height, the h=0.04 one-line guard, renderer ownership, Persistent Overlay
+  no-replay, no scrolling, no touch/input.
+- roadmap: 2M.2E Direct Touch Input Probe -> 2M.2F Direct Touch Scroll only if
+  the probe proves safe.
 
 ## Phase 2C.2 Wayland environment
 

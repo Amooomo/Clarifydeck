@@ -605,7 +605,7 @@ class ClarifyDeckEngine:
         if self._role != "leader" or OverlayManager is None:
             return
         if self._overlay is None:
-            self._overlay = OverlayManager(debug=debug)
+            self._overlay = OverlayManager(debug=debug, presentation_path=self.presentation_path())
 
     async def enable_overlay(self) -> dict[str, Any]:
         if self._role != "leader" or self._overlay is None:
@@ -722,6 +722,17 @@ class ClarifyDeckEngine:
         except Exception as exc:
             decky.logger.error(f"region font size set failed: {exc}")
             return {"ok": False, "error": "region_font_size_failed", "detail": str(exc)}
+
+    # -- Phase 2M.2D persisted per-region appearance (style + font size) ----
+
+    async def region_appearance_save(self, region_id: str) -> dict[str, Any]:
+        if self._role != "leader" or self._overlay is None:
+            return {"ok": False, "error": "overlay_unavailable"}
+        try:
+            return await self._overlay.save_region_appearance(region_id)
+        except Exception as exc:
+            decky.logger.error(f"region appearance save failed: {exc}")
+            return {"ok": False, "error": "region_appearance_save_failed", "detail": str(exc)}
 
     def capture_test(self, mode: str = "base_plane_only", output: str = "") -> dict[str, Any]:
         """One-shot capture isolation test. Never starts a loop, OCR or overlay."""
@@ -1015,6 +1026,9 @@ class ClarifyDeckEngine:
 
     def region_profiles_path(self) -> Path:
         return self.roi_config_path().parent / "region_profiles"
+
+    def presentation_path(self) -> Path:
+        return self.roi_config_path().parent / "overlay_presentation.json"
 
     def _roi_store(self) -> Optional[Any]:
         if recognition_roi is None:
@@ -1667,6 +1681,9 @@ class Plugin:
 
     async def region_font_size_set(self, region_id: str, font_size: int) -> dict[str, Any]:
         return await get_engine().region_font_size_set(region_id, font_size)
+
+    async def region_appearance_save(self, region_id: str) -> dict[str, Any]:
+        return await get_engine().region_appearance_save(region_id)
 
     async def capture_test_base_plane(self, output: str = "") -> dict[str, Any]:
         loop = asyncio.get_event_loop()

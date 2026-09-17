@@ -97,6 +97,17 @@ type FontSizeResult = {
 const regionFontSizeGet = callable<[regionId: string], FontSizeResult>("region_font_size_get");
 const regionFontSizeSet = callable<[regionId: string, fontSize: number], FontSizeResult>("region_font_size_set");
 
+// Phase 2M.2D explicit persistence of the selected region's style + font size.
+type AppearanceSaveResult = {
+  ok?: boolean;
+  error?: string;
+  detail?: string;
+  region_id?: string;
+  style?: string;
+  font_size?: number;
+};
+const regionAppearanceSave = callable<[regionId: string], AppearanceSaveResult>("region_appearance_save");
+
 // No app_id source exists in the QAM yet, so "This Game" is unavailable.
 const CURRENT_APP_ID: string | null = null;
 
@@ -289,6 +300,29 @@ export function RegionEditorSection() {
         }
       }
     })();
+  };
+
+  // Explicit persistence: never auto-saved on style/font changes.
+  const saveAppearance = async () => {
+    if (!selectedId) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const result = await regionAppearanceSave(selectedId);
+      if (mounted.current && result && result.ok === false) {
+        setError(result.detail || result.error || "Save appearance failed");
+      }
+    } catch (err) {
+      if (mounted.current) {
+        setError(`Save appearance failed: ${String(err)}`);
+      }
+    } finally {
+      if (mounted.current) {
+        setBusy(false);
+      }
+    }
   };
 
   // In-QAM draft preview store (also feeds the renderer preview below).
@@ -686,7 +720,7 @@ export function RegionEditorSection() {
             }
           />
           <PanelSectionRow>
-            <div style={hintStyle}>Text panel style (this session only)</div>
+            <div style={hintStyle}>Text panel style</div>
           </PanelSectionRow>
           <PanelSectionRow>
             <div style={rowActionsStyle}>
@@ -709,7 +743,7 @@ export function RegionEditorSection() {
             </div>
           </PanelSectionRow>
           <PanelSectionRow>
-            <div style={hintStyle}>Text size (this session only)</div>
+            <div style={hintStyle}>Text size</div>
           </PanelSectionRow>
           <GeometrySlider
             label="Size"
@@ -719,6 +753,16 @@ export function RegionEditorSection() {
             value={selectedFontSize}
             onChange={changeFontSize}
           />
+          <PanelSectionRow>
+            <ButtonItem layout="below" disabled={busy} onClick={() => void saveAppearance()}>
+              Save appearance
+            </ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <div style={hintStyle}>
+              Saves this Region's panel style and text size so they survive a restart.
+            </div>
+          </PanelSectionRow>
         </>
       ) : null}
       <PanelSectionRow>

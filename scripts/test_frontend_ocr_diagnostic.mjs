@@ -558,10 +558,10 @@ check("panel: style state keyed by region_id", () => {
   assert.ok(regionComponentSrc.includes("styleByRegion"));
   assert.ok(regionComponentSrc.includes("styleByRegion[selectedId]"));
 });
-check("panel: style is session-only (no persistence)", () => {
+check("panel: style is runtime until explicitly saved", () => {
   assert.equal(regionComponentSrc.includes("overlay_presentation"), false);
   assert.equal(regionComponentSrc.includes("localStorage"), false);
-  assert.ok(regionComponentSrc.includes("this session only"));
+  assert.ok(regionComponentSrc.includes("Text panel style"));
 });
 check("panel: bounded font-size range, no custom font controls", () => {
   assert.equal(r.MIN_REGION_FONT_SIZE, 14);
@@ -741,6 +741,27 @@ check("remediation: preview not disabled on transient remount", () => {
 });
 check("remediation: no renderer/input changes in editor", () => {
   for (const needle of ["ShapeInput", "XInput2", "touch_scroll", "scroll_offset"]) {
+    assert.equal(regionComponentSrc.includes(needle), false, needle);
+  }
+});
+
+// -- Phase 2M.2D per-region presentation persistence --------------------------
+
+check("persistence: save appearance RPC declared once", () => {
+  assert.equal(countOccurrences(regionComponentSrc, '"region_appearance_save"'), 1);
+});
+check("persistence: save targets selected region_id", () => {
+  assert.ok(regionComponentSrc.includes("regionAppearanceSave(selectedId)"));
+  assert.ok(regionComponentSrc.includes("Save appearance"));
+});
+check("persistence: explicit save only (no auto-save)", () => {
+  assert.equal(countOccurrences(regionComponentSrc, "regionAppearanceSave("), 1);
+});
+check("persistence: save failure surfaced", () => {
+  assert.ok(regionComponentSrc.includes("Save appearance failed"));
+});
+check("persistence: no scroll/touch UI", () => {
+  for (const needle of ["scroll_offset", "touch"]) {
     assert.equal(regionComponentSrc.includes(needle), false, needle);
   }
 });

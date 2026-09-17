@@ -43,6 +43,7 @@ except Exception:  # pragma: no cover - smoke tests / standalone
 
 
 from overlay import protocol
+from overlay import presentation
 
 PLUGIN_ROOT = Path(__file__).resolve().parent
 RENDERER_PATH = PLUGIN_ROOT / "overlay" / "renderer.py"
@@ -177,7 +178,7 @@ def gamescope_ready(display: str) -> bool:
 
 
 class OverlayManager:
-    def __init__(self, debug: bool = False) -> None:
+    def __init__(self, debug: bool = False, presentation_path: Optional[Path] = None) -> None:
         self.debug = debug
         self.socket_path = protocol.socket_path()
         self.display = resolve_overlay_display()
@@ -201,6 +202,14 @@ class OverlayManager:
         self._region_style: dict = {}
         # Phase 2M.2B runtime-only per-region font size (never persisted).
         self._region_font_size: dict = {}
+        # Phase 2M.2D persisted per-region presentation (style + font_size).
+        # Loading restores state only: it never starts OCR/renderer or replays text.
+        self._presentation: Optional[presentation.PresentationStore] = None
+        if presentation_path is not None:
+            self._presentation = presentation.PresentationStore(presentation_path)
+            for region_id, entry in self._presentation.entries().items():
+                self._region_style[region_id] = entry["style"]
+                self._region_font_size[region_id] = entry["font_size"]
 
     # -- identity ----------------------------------------------------------
 
@@ -442,6 +451,29 @@ class OverlayManager:
                 self._region_text[key]["font_size"] = normalized
                 self._send({"type": "set_region_font_size", "region_id": key, "font_size": normalized})
             return {"ok": True, "region_id": key, "font_size": normalized}
+
+    async def save_region_appearance(self, region_id: str) -> dict:
+        """Persist the region's current runtime style + font size.
+
+        Saves only the target region and preserves every other entry (including
+        regions in inactive/deleted profiles). Never starts/stops OCR or the
+        renderer, never changes geometry/style/font, and never creates a block.
+        """
+        async with self._lock:
+            key = str(region_id) if region_id is not None else ""
+            if not key:
+                return {"ok": False, "error": "invalid_region_id"}
+            if self._presentation is None:
+                return {"ok": False, "error": "presentation_unavailable"}
+            style = self._region_style.get(key, protocol.DEFAULT_STYLE)
+            font_size = self._region_font_size.get(key, protocol.DEFAULT_REGION_FONT_SIZE)
+            if not self._presentation.update(key, style, font_size):
+                return {"ok": False, "error": "invalid_appearance"}
+            try:
+                self._presentation.save()
+            except (OSError, ValueError) as exc:
+                return {"ok": False, "error": "presentation_write_failed", "detail": str(exc)}
+            return {"ok": True, "region_id": key, "style": style, "font_size": font_size}
 
     async def hide_region_text(self, region_id: str) -> dict:
         async with self._lock:
