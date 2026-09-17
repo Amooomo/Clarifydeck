@@ -479,8 +479,11 @@ check("name: reorder renumbers by order, ids unchanged", () => {
 // -- Phase 2L.8.2 explicit renderer-based region preview ----------------------
 
 check("f1: preview default OFF and explicit control", () => {
-  assert.ok(regionComponentSrc.includes("const [previewOn, setPreviewOn] = useState(false)"));
+  assert.ok(regionComponentSrc.includes("useState<boolean>("));
+  assert.ok(regionComponentSrc.includes("getRegionEditorSession().previewOn"));
   assert.ok(regionComponentSrc.includes("setPreviewOn"));
+  r.resetRegionEditorSession();
+  assert.equal(r.getRegionEditorSession().previewOn, false);
 });
 check("f2: preview ON drives backend preview RPCs", () => {
   assert.ok(regionComponentSrc.includes("setRegionPreviewEnabled(previewOn)"));
@@ -679,7 +682,7 @@ check("regions: lower +/- controls", () => {
   assert.ok(regionComponentSrc.includes("onClick={removeSelected}"));
 });
 check("regions: add/delete selection fallback", () => {
-  assert.ok(regionComponentSrc.includes("setSelectedId(draft.region_id)"));
+  assert.ok(regionComponentSrc.includes("selectRegion(draft.region_id)"));
   assert.ok(regionComponentSrc.includes("nextSelectionAfterRemove"));
 });
 check("regions: draft Apply writes active profile only", () => {
@@ -693,6 +696,53 @@ check("profiles: no persistence/scroll/touch UI", () => {
 check("profiles: style and font selectors preserved", () => {
   assert.ok(regionComponentSrc.includes("regionPanelStyleSet(selectedId, style)"));
   assert.ok(regionComponentSrc.includes("regionFontSizeSet(selectedId, size)"));
+});
+
+// -- Phase 2M.2C.1 device remediation ------------------------------------------
+
+check("remediation: four compact +/- controls", () => {
+  assert.equal(countOccurrences(regionComponentSrc, "style={compactButtonStyle("), 4);
+  assert.equal(countOccurrences(regionComponentSrc, "<button"), 4);
+  assert.ok(regionComponentSrc.includes('width: "30px"'));
+  assert.ok(regionComponentSrc.includes('height: "30px"'));
+  assert.ok(regionComponentSrc.includes("minmax(0, 1fr) 30px 30px"));
+  assert.ok(regionComponentSrc.includes('aria-label="Add Region Set"'));
+  assert.ok(regionComponentSrc.includes('aria-label="Delete Region Set"'));
+  assert.ok(regionComponentSrc.includes('aria-label="Add Region"'));
+  assert.ok(regionComponentSrc.includes('aria-label="Delete Region"'));
+});
+check("remediation: dropdown value normalization", () => {
+  assert.equal(r.dropdownOptionValue({ data: "abc" }), "abc");
+  assert.equal(r.dropdownOptionValue("abc"), "abc");
+  assert.equal(r.dropdownOptionValue({ data: 2 }), "2");
+  assert.equal(r.dropdownOptionValue(undefined), null);
+  assert.equal(r.dropdownOptionValue({}), null);
+});
+check("remediation: Region selection explicit and remembered", () => {
+  assert.ok(regionComponentSrc.includes("selectRegion(dropdownOptionValue(option))"));
+  assert.ok(regionComponentSrc.includes("selectedIdRef"));
+  assert.ok(regionComponentSrc.includes("rememberRegionSelection"));
+});
+check("remediation: editor session survives transient remount", () => {
+  r.resetRegionEditorSession();
+  r.rememberRegionSelection("r2");
+  r.rememberRegionPreview(true);
+  assert.equal(r.getRegionEditorSession().selectedId, "r2");
+  assert.equal(r.getRegionEditorSession().previewOn, true);
+  r.resetRegionEditorSession();
+  assert.equal(r.getRegionEditorSession().selectedId, null);
+  assert.equal(r.getRegionEditorSession().previewOn, false);
+});
+check("remediation: preview not disabled on transient remount", () => {
+  assert.ok(regionComponentSrc.includes("qamVisibleRef"));
+  assert.ok(regionComponentSrc.includes("getRegionEditorSession().previewOn"));
+  assert.ok(regionComponentSrc.includes("rememberRegionPreview"));
+  assert.ok(regionComponentSrc.includes("resetRegionEditorSession"));
+});
+check("remediation: no renderer/input changes in editor", () => {
+  for (const needle of ["ShapeInput", "XInput2", "touch_scroll", "scroll_offset"]) {
+    assert.equal(regionComponentSrc.includes(needle), false, needle);
+  }
 });
 
 if (process.exitCode) {

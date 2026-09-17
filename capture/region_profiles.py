@@ -49,6 +49,16 @@ MAX_PROFILE_LABEL_LENGTH = 64
 MAX_PROFILE_FILENAME_LENGTH = 128
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_LABEL_RE = re.compile(r"^Region Set (\d+)$")
+
+
+def next_available_region_set_number(existing_numbers) -> int:
+    """Smallest unused positive display number for a Region Set label."""
+    used = {int(number) for number in existing_numbers}
+    number = 1
+    while number in used:
+        number += 1
+    return number
 
 
 def _safe_filename(name: Any) -> Optional[str]:
@@ -237,13 +247,29 @@ class RegionProfileStore:
         profile_id = uuid.uuid4().hex
         filename = f"{PROFILE_FILE_PREFIX}{profile_id}{PROFILE_FILE_SUFFIX}"
         self._write_profile_regions(filename, regions)
-        label = f"{DEFAULT_LABEL_PREFIX} {self._index.get('next_label_number', len(self._index['profiles']) + 1)}"
+        label = self._next_label()
         self._index["profiles"].append(
             {"profile_id": profile_id, "label": label, "file": filename}
         )
-        self._index["next_label_number"] = self._index.get("next_label_number", 1) + 1
+        self._index["next_label_number"] = self._next_label_number()
         self._index["active_profile_id"] = profile_id
         self._write_index(self._index)
+
+    # -- display-number allocation (smallest unused positive integer) -------
+
+    def _display_numbers(self) -> set[int]:
+        numbers: set[int] = set()
+        for profile in self._index["profiles"]:
+            match = _LABEL_RE.match(str(profile.get("label", "")))
+            if match:
+                numbers.add(int(match.group(1)))
+        return numbers
+
+    def _next_label_number(self) -> int:
+        return next_available_region_set_number(self._display_numbers())
+
+    def _next_label(self) -> str:
+        return f"{DEFAULT_LABEL_PREFIX} {self._next_label_number()}"
 
     def _quarantine_corrupt_index(self, reason: str) -> None:
         path = self.index_path
@@ -348,11 +374,11 @@ class RegionProfileStore:
         filename = f"{PROFILE_FILE_PREFIX}{profile_id}{PROFILE_FILE_SUFFIX}"
         # 1) write the new profile file first, 2) then reference it in the index.
         self._write_profile_regions(filename, regions)
-        label = f"{DEFAULT_LABEL_PREFIX} {self._index.get('next_label_number', len(self._index['profiles']) + 1)}"
+        label = self._next_label()
         self._index["profiles"].append(
             {"profile_id": profile_id, "label": label, "file": filename}
         )
-        self._index["next_label_number"] = self._index.get("next_label_number", 1) + 1
+        self._index["next_label_number"] = self._next_label_number()
         self._index["active_profile_id"] = profile_id
         self._write_index(self._index)
         return self.payload()

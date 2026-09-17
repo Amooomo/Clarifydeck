@@ -297,6 +297,69 @@ class ProfileStoreTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(store.active_profile_path()).st_mode), 0o600)
 
 
+class LabelReuseTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.directory = self.root / "region_profiles"
+        self.legacy = self.root / "recognition_roi.json"
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _store(self) -> rp.RegionProfileStore:
+        return rp.RegionProfileStore(self.directory, legacy_path=self.legacy)
+
+    def test_l1_l4_smallest_unused_number(self) -> None:
+        self.assertEqual(rp.next_available_region_set_number(set()), 1)
+        self.assertEqual(rp.next_available_region_set_number({1}), 2)
+        self.assertEqual(rp.next_available_region_set_number({1, 2}), 3)
+        self.assertEqual(rp.next_available_region_set_number({1, 3}), 2)
+        self.assertEqual(rp.next_available_region_set_number({2, 3}), 1)
+
+    def test_l5_delete_then_add_reuses_number(self) -> None:
+        store = self._store()
+        store.add()  # Region Set 2
+        second_id = store.active_profile_id
+        store.delete(second_id)
+        result = store.add()
+        self.assertEqual(result["profiles"][-1]["label"], "Region Set 2")
+
+    def test_l6_l7_l8_reused_label_fresh_identity_and_data(self) -> None:
+        store = self._store()
+        store.add()
+        old_id = store.active_profile_id
+        old_path = store.active_profile_path()
+        rr.RegionConfigStore(old_path).set_regions(
+            None, rr.RecognitionRegionSet((rr.RecognitionRegion("old-region", 0.3, 0.3, 0.2, 0.2),))
+        )
+        store.delete(old_id)
+        store.add()
+        new_id = store.active_profile_id
+        new_path = store.active_profile_path()
+        self.assertNotEqual(new_id, old_id)
+        self.assertNotEqual(new_path, old_path)
+        regions = _profile_regions(store)
+        self.assertEqual(len(regions), 1)
+        self.assertNotEqual(regions[0].region_id, "old-region")
+
+    def test_l9_restart_preserves_reused_label(self) -> None:
+        store = self._store()
+        store.add()
+        store.delete(store.active_profile_id)
+        store.add()
+        label = store.payload()["profiles"][-1]["label"]
+        self.assertEqual(self._store().payload()["profiles"][-1]["label"], label)
+
+    def test_l10_max_limit_unchanged(self) -> None:
+        store = self._store()
+        for _ in range(rp.MAX_REGION_PROFILES - 1):
+            store.add()
+        with self.assertRaises(CaptureError) as ctx:
+            store.add()
+        self.assertEqual(ctx.exception.code, "too_many_profiles")
+
+
 class EngineProfileRpcTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

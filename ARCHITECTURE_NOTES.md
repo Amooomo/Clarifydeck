@@ -1852,7 +1852,13 @@ Device validation (from `15f96a5427fa9018aa081436d3a4bb98cc6eb2f1`):
 
 ## Phase 2M.2C — Region Profile JSON Management + Dropdown Region CRUD
 
-Status: LOCAL PASS / DEVICE RETEST PENDING
+Status: DEVICE FAIL / REMEDIATION IN PROGRESS
+
+Device failures (from `79a5c6b7838d2d7321e6d8c2f3d13e5dc802b77d`):
+- oversized `+`/`-` controls beside Region Set and Region disrupted QAM use
+- a deleted Region Set display number was not reused (monotonic labels)
+- the Region dropdown did not actually select Region 2 (editor stayed on Region 1)
+- Region Preview visually disappeared while a Dropdown popup was open
 
 - Region Sets ("Region Profiles") are independently persisted JSON files under
   `<settings>/region_profiles/`. New module `capture/region_profiles.py`
@@ -1904,6 +1910,43 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
   changes.
 - roadmap: 2M.2D Presentation Persistence (style + font) -> 2M.2E Direct Touch
   Input Probe -> 2M.2F Direct Touch Scroll only if the probe proves safe.
+
+## Phase 2M.2C.1 — Device Remediation
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+- F1 compact controls: the four `+`/`-` actions are now fixed 30x30px native
+  buttons (`compactButtonStyle`) in a `minmax(0, 1fr) 30px 30px` grid, so the
+  Dropdown keeps the row width and the actions no longer flex-grow or overflow.
+- F2 label reuse: Region Set display numbers now allocate the smallest unused
+  positive integer (`next_available_region_set_number`, parsed from canonical
+  `Region Set N` labels) instead of a monotonic counter. Deleting Region Set 2
+  and adding again yields `Region Set 2` with a fresh `profile_id` and a fresh
+  `profile_<uuid>.json` (no identity/data resurrection). `next_label_number`
+  remains in the index for backward compatibility but is no longer the allocator.
+- F3 Region dropdown selection: root cause is that the QAM editor can remount
+  while a Dropdown context menu is open, which discarded the editor-local
+  `selectedId` (the Region Set dropdown only appeared to work because the active
+  profile is persisted to the backend index). Fix: `selectRegion` is now the
+  single selection path, Dropdown payloads are normalized
+  (`dropdownOptionValue`, accepts `{data}` or a raw value), option arrays are
+  memoized, and selection is remembered in a module-level editor session
+  (`rememberRegionSelection`) so it survives a transient remount. `[Primary]`
+  remains display-only and never forces selection.
+- F4 Preview/dropdown coexistence: frontend audit found no RPC that clears or
+  disables Preview on Dropdown open; the only path was the unmount cleanup
+  disabling Preview when the editor remounted. Fix: `previewOn` intent is
+  remembered in the same editor session and restored on remount, and the unmount
+  cleanup now only tears Preview down when the QAM is genuinely closing
+  (`qamVisibleRef`), while a QAM-close effect also disables Preview and resets the
+  session. No renderer/X11/input/ShapeInput change was made. If the visual
+  disappearance persists on device with backend `preview_enabled=true`, it is a
+  Steam/Gamescope popup compositor limitation and must be reported, not fixed in
+  the renderer.
+- unchanged: profile/index schema, profile_id and region_id identity, active
+  profile semantics, atomic writes, Region CRUD, OCR Start-time snapshot, no
+  replay, Preview default OFF, no presentation persistence, no scrolling, no
+  touch/input, no renderer draw/ownership changes.
 
 ## Phase 2C.2 Wayland environment
 

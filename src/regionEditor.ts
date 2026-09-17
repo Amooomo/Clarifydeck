@@ -296,3 +296,49 @@ export function clampRegionFontSize(value: unknown): number {
   const stepped = Math.round(value / REGION_FONT_SIZE_STEP) * REGION_FONT_SIZE_STEP;
   return Math.min(MAX_REGION_FONT_SIZE, Math.max(MIN_REGION_FONT_SIZE, stepped));
 }
+
+// -- Phase 2M.2C.1 editor session + Dropdown value normalization ---------------
+// Steam's QAM content can remount while a Dropdown context menu is open. These
+// module-level values keep the editor's Region selection and Preview intent
+// stable across such transient remounts, and are reset when the QAM closes.
+
+export type RegionEditorSession = {
+  selectedId: string | null;
+  previewOn: boolean;
+};
+
+let editorSession: RegionEditorSession = { selectedId: null, previewOn: false };
+
+export function getRegionEditorSession(): RegionEditorSession {
+  return { ...editorSession };
+}
+
+export function rememberRegionSelection(selectedId: string | null): void {
+  editorSession = { ...editorSession, selectedId };
+}
+
+export function rememberRegionPreview(previewOn: boolean): void {
+  editorSession = { ...editorSession, previewOn };
+}
+
+export function resetRegionEditorSession(): void {
+  editorSession = { selectedId: null, previewOn: false };
+}
+
+// Accept both a Decky Dropdown option object ({ data }) and a raw value.
+export function dropdownOptionValue(option: unknown): string | null {
+  if (typeof option === "string") {
+    return option;
+  }
+  if (option && typeof option === "object" && "data" in (option as Record<string, unknown>)) {
+    const value = (option as { data?: unknown }).data;
+    if (typeof value === "string") {
+      return value;
+    }
+    if (value === null || value === undefined) {
+      return null;
+    }
+    return String(value);
+  }
+  return null;
+}

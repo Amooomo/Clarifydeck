@@ -5,7 +5,7 @@
 
 import { ButtonItem, Dropdown, PanelSection, PanelSectionRow } from "@decky/ui";
 import { callable, useQuickAccessVisible } from "@decky/api";
-import { type CSSProperties, useEffect, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import {
   DEFAULT_PANEL_STYLE,
   DEFAULT_REGION_FONT_SIZE,
@@ -19,7 +19,9 @@ import {
   clampRegionFontSize,
   clearRegionPreview,
   describeSource,
+  dropdownOptionValue,
   draftsForApply,
+  getRegionEditorSession,
   isPanelStyle,
   isRegionFontSize,
   moveRegion,
@@ -29,7 +31,10 @@ import {
   primaryRegionId,
   regionLabel,
   regionPreviewPayload,
+  rememberRegionPreview,
+  rememberRegionSelection,
   removeRegion,
+  resetRegionEditorSession,
   scopeAppId,
   scopeOptions,
   setRegionEnabled,
@@ -99,18 +104,36 @@ export function RegionEditorSection() {
   const [config, setConfig] = useState<RegionConfigPayload | undefined>();
   const [drafts, setDrafts] = useState<RegionDraft[]>([]);
   const [configured, setConfigured] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedIdState] = useState<string | null>(
+    () => getRegionEditorSession().selectedId,
+  );
   const [profiles, setProfiles] = useState<RegionProfileInfo[]>([]);
   const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
   const [maxProfiles, setMaxProfiles] = useState(8);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [previewOn, setPreviewOn] = useState(false);
+  const [previewOn, setPreviewOnState] = useState<boolean>(
+    () => getRegionEditorSession().previewOn,
+  );
   const [styleByRegion, setStyleByRegion] = useState<Record<string, string>>({});
   const [fontByRegion, setFontByRegion] = useState<Record<string, number>>({});
   const mounted = useRef(true);
   const previewOnRef = useRef(false);
+  const selectedIdRef = useRef<string | null>(selectedId);
   const qamVisible = useQuickAccessVisible();
+  const qamVisibleRef = useRef(qamVisible);
+  const prevQamVisibleRef = useRef(qamVisible);
+
+  const selectRegion = (regionId: string | null) => {
+    selectedIdRef.current = regionId;
+    setSelectedIdState(regionId);
+    rememberRegionSelection(regionId);
+  };
+
+  const setPreviewOn = (value: boolean) => {
+    setPreviewOnState(value);
+    rememberRegionPreview(value);
+  };
 
   const applyPayload = (result: RegionConfigPayload) => {
     setConfig(result);
@@ -118,11 +141,12 @@ export function RegionEditorSection() {
     setConfigured(configuredNow);
     const source = configuredNow ? result.configured_regions ?? [] : result.effective_regions ?? [];
     setDrafts(source.map((region) => ({ ...region })));
-    setSelectedId((current) =>
+    const current = selectedIdRef.current;
+    const next =
       current && source.some((region) => region.region_id === current)
         ? current
-        : source[0]?.region_id ?? null,
-    );
+        : source[0]?.region_id ?? null;
+    selectRegion(next);
   };
 
   const applyProfilesPayload = (result: RegionProfilesPayload) => {
@@ -174,6 +198,14 @@ export function RegionEditorSection() {
       mounted.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
+  useEffect(() => {
+    qamVisibleRef.current = qamVisible;
+  }, [qamVisible]);
 
   const selected = drafts.find((region) => region.region_id === selectedId) ?? null;
   const primaryId = primaryRegionId(drafts);
@@ -267,6 +299,7 @@ export function RegionEditorSection() {
   // Explicit renderer preview lifecycle. Default OFF; QAM open never enables it.
   useEffect(() => {
     previewOnRef.current = previewOn;
+    rememberRegionPreview(previewOn);
     void (async () => {
       try {
         await setRegionPreviewEnabled(previewOn);
@@ -294,22 +327,43 @@ export function RegionEditorSection() {
     })();
   }, [previewOn, drafts, selectedId, primaryId]);
 
-  // QAM/editor close: clear the renderer preview and the in-QAM store.
+  // Editor close. If the QAM is still visible this is a transient remount (e.g.
+  // a Dropdown context menu): keep the renderer preview and the editor session
+  // so Preview/selection survive. A genuine QAM close is handled below.
   useEffect(
     () => () => {
+      if (qamVisibleRef.current) {
+        return;
+      }
       if (previewOnRef.current) {
         void setRegionPreviewEnabled(false);
         void clearRegionPreviewRegions();
       }
       clearRegionPreview();
+      resetRegionEditorSession();
     },
     [],
   );
 
   useEffect(() => {
+    const wasVisible = prevQamVisibleRef.current;
+    prevQamVisibleRef.current = qamVisible;
+    qamVisibleRef.current = qamVisible;
     if (qamVisible) {
       void load();
+      return;
     }
+    if (!wasVisible) {
+      // Initial render before visibility is reported: nothing to tear down.
+      return;
+    }
+    // QAM genuinely closed: clear the renderer preview and forget the session.
+    previewOnRef.current = false;
+    setPreviewOnState(false);
+    resetRegionEditorSession();
+    void setRegionPreviewEnabled(false);
+    void clearRegionPreviewRegions();
+    clearRegionPreview();
   }, [qamVisible]);
 
   const addRegion = () => {
@@ -318,14 +372,14 @@ export function RegionEditorSection() {
     }
     const draft = newRegionDraft(drafts.length);
     setDrafts((current) => [...current, draft]);
-    setSelectedId(draft.region_id);
+    selectRegion(draft.region_id);
   };
 
   const removeSelected = () => {
     if (!selected) {
       return;
     }
-    setSelectedId((current) => nextSelectionAfterRemove(drafts, current ?? selected.region_id));
+    selectRegion(nextSelectionAfterRemove(drafts, selectedIdRef.current ?? selected.region_id));
     setDrafts((current) => removeRegion(current, selected.region_id));
   };
 
@@ -460,11 +514,18 @@ export function RegionEditorSection() {
   };
 
   const scopes = scopeOptions(CURRENT_APP_ID !== null);
-  const profileOptions = profiles.map((profile) => ({ data: profile.profile_id, label: profile.label }));
-  const regionOptions = drafts.map((region, index) => ({
-    data: region.region_id,
-    label: regionLabel(region, index, primaryId),
-  }));
+  const profileOptions = useMemo(
+    () => profiles.map((profile) => ({ data: profile.profile_id, label: profile.label })),
+    [profiles],
+  );
+  const regionOptions = useMemo(
+    () =>
+      drafts.map((region, index) => ({
+        data: region.region_id,
+        label: regionLabel(region, index, primaryId),
+      })),
+    [drafts, primaryId],
+  );
 
   return (
     <PanelSection title="Recognition Regions">
@@ -491,22 +552,26 @@ export function RegionEditorSection() {
             rgOptions={profileOptions}
             selectedOption={activeProfileId}
             disabled={busy || profileOptions.length === 0}
-            onChange={(option) => void selectProfile(option.data)}
+            onChange={(option) => void selectProfile(dropdownOptionValue(option) ?? "")}
           />
-          <ButtonItem
-            layout="below"
+          <button
+            type="button"
+            aria-label="Add Region Set"
             disabled={busy || profiles.length >= maxProfiles}
             onClick={() => void addProfile()}
+            style={compactButtonStyle(busy || profiles.length >= maxProfiles)}
           >
             +
-          </ButtonItem>
-          <ButtonItem
-            layout="below"
+          </button>
+          <button
+            type="button"
+            aria-label="Delete Region Set"
             disabled={busy || profiles.length <= 1}
             onClick={() => void deleteProfile()}
+            style={compactButtonStyle(busy || profiles.length <= 1)}
           >
             -
-          </ButtonItem>
+          </button>
         </div>
       </PanelSectionRow>
       <PanelSectionRow>
@@ -518,22 +583,26 @@ export function RegionEditorSection() {
             rgOptions={regionOptions}
             selectedOption={selectedId}
             disabled={busy || regionOptions.length === 0}
-            onChange={(option) => setSelectedId(option.data)}
+            onChange={(option) => selectRegion(dropdownOptionValue(option))}
           />
-          <ButtonItem
-            layout="below"
+          <button
+            type="button"
+            aria-label="Add Region"
             disabled={!canAddRegion(drafts) || busy}
             onClick={addRegion}
+            style={compactButtonStyle(!canAddRegion(drafts) || busy)}
           >
             +
-          </ButtonItem>
-          <ButtonItem
-            layout="below"
+          </button>
+          <button
+            type="button"
+            aria-label="Delete Region"
             disabled={!selected || busy}
             onClick={removeSelected}
+            style={compactButtonStyle(!selected || busy)}
           >
             -
-          </ButtonItem>
+          </button>
         </div>
       </PanelSectionRow>
       {drafts.length === 0 ? (
@@ -560,7 +629,7 @@ export function RegionEditorSection() {
         </div>
       </PanelSectionRow>
       <PanelSectionRow>
-        <ButtonItem layout="below" disabled={busy} onClick={() => setPreviewOn((value) => !value)}>
+        <ButtonItem layout="below" disabled={busy} onClick={() => setPreviewOn(!previewOn)}>
           {previewOn ? "[x] Show Region Preview" : "[ ] Show Region Preview"}
         </ButtonItem>
       </PanelSectionRow>
@@ -715,9 +784,28 @@ const selectorRowStyle: CSSProperties = {
   alignItems: "center",
   display: "grid",
   gap: "6px",
-  gridTemplateColumns: "1fr 52px 52px",
+  gridTemplateColumns: "minmax(0, 1fr) 30px 30px",
   width: "100%",
 };
+
+const compactButtonStyle = (disabled: boolean): CSSProperties => ({
+  alignItems: "center",
+  background: disabled ? "#2a2e36" : "#3d4450",
+  border: "1px solid #5a6270",
+  borderRadius: "4px",
+  color: disabled ? "#8a8f98" : "#f5f5f5",
+  cursor: disabled ? "default" : "pointer",
+  display: "flex",
+  flex: "0 0 auto",
+  fontSize: "18px",
+  fontWeight: 700,
+  height: "30px",
+  justifyContent: "center",
+  lineHeight: 1,
+  minWidth: 0,
+  padding: 0,
+  width: "30px",
+});
 
 const statusStyle: CSSProperties = {
   color: "#d9d9d9",
