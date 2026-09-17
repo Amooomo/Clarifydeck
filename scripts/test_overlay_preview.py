@@ -507,6 +507,135 @@ class ManagerPreviewTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    # -- Phase 2M.2B runtime per-region font size --------------------------
+
+    def test_font_default_is_20(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            result = await manager.get_region_font_size("A")
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["font_size"], 20)
+
+        asyncio.run(run())
+
+    def test_font_valid_update_only_target_region(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            result = await manager.set_region_font_size("A", 28)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["font_size"], 28)
+            self.assertEqual((await manager.get_region_font_size("A"))["font_size"], 28)
+            self.assertEqual((await manager.get_region_font_size("B"))["font_size"], 20)
+
+        asyncio.run(run())
+
+    def test_font_two_regions_independent(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.set_region_font_size("A", 18)
+            await manager.set_region_font_size("B", 30)
+            self.assertEqual((await manager.get_region_font_size("A"))["font_size"], 18)
+            self.assertEqual((await manager.get_region_font_size("B"))["font_size"], 30)
+
+        asyncio.run(run())
+
+    def test_font_invalid_values_rejected_preserve_previous(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.set_region_font_size("A", 28)
+            for bad in (13, 49, 0, -4, 20.5, "20", None, True, float("nan"), float("inf")):
+                result = await manager.set_region_font_size("A", bad)
+                self.assertFalse(result["ok"], bad)
+                self.assertEqual(result["error"], "invalid_font_size")
+            self.assertEqual((await manager.get_region_font_size("A"))["font_size"], 28)
+
+        asyncio.run(run())
+
+    def test_font_without_text_no_block_no_send(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            manager._sock.sent.clear()
+            await manager.set_region_font_size("A", 30)
+            self.assertEqual(manager._sock.types(), [])
+            self.assertEqual(manager.status()["region_text_count"], 0)
+
+        asyncio.run(run())
+
+    def test_font_retained_for_later_text(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            await manager.set_region_font_size("A", 30)
+            manager._sock.sent.clear()
+            await manager.set_region_text("A", (0.1, 0.1, 0.2, 0.2), "hi")
+            payload = json.loads(manager._sock.sent[-1].decode())
+            self.assertEqual(payload["type"], "set_region_text")
+            self.assertEqual(payload["font_size"], 30)
+
+        asyncio.run(run())
+
+    def test_font_update_visible_block_live(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            await manager.set_region_text("A", (0.1, 0.1, 0.2, 0.2), "hi")
+            manager._sock.sent.clear()
+            result = await manager.set_region_font_size("A", 30)
+            self.assertTrue(result["ok"])
+            self.assertEqual(manager._sock.types(), ["set_region_font_size"])
+            payload = json.loads(manager._sock.sent[-1].decode())
+            self.assertEqual(payload["region_id"], "A")
+            self.assertEqual(payload["font_size"], 30)
+            self.assertEqual(manager._region_text["A"]["font_size"], 30)
+
+        asyncio.run(run())
+
+    def test_font_and_style_stay_independent(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            await manager.set_region_text("A", (0.1, 0.1, 0.2, 0.2), "hi")
+            await manager.set_region_panel_style("A", "black_on_white")
+            await manager.set_region_font_size("A", 30)
+            self.assertEqual(manager._region_text["A"]["style"], "black_on_white")
+            self.assertEqual(manager._region_text["A"]["font_size"], 30)
+            await manager.set_region_panel_style("A", "white_on_black")
+            self.assertEqual(manager._region_text["A"]["font_size"], 30)
+
+        asyncio.run(run())
+
+    def test_font_clear_retention(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            await manager.set_region_text("A", (0.1, 0.1, 0.2, 0.2), "a")
+            await manager.set_region_font_size("A", 32)
+            await manager.clear_all_region_text()
+            self.assertEqual(manager.status()["region_text_count"], 0)
+            self.assertEqual((await manager.get_region_font_size("A"))["font_size"], 32)
+
+        asyncio.run(run())
+
+    def test_font_change_does_not_start_renderer(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.set_region_font_size("A", 30)
+            self.assertEqual(self.spawn_calls["n"], 0)
+            self.assertEqual(manager.status()["state"], "DISABLED")
+
+        asyncio.run(run())
+
+    def test_font_survives_disable_within_lifetime(self) -> None:
+        async def run():
+            manager = self.om.OverlayManager()
+            await manager.enable()
+            await manager.set_region_font_size("A", 30)
+            await manager.disable()
+            self.assertEqual((await manager.get_region_font_size("A"))["font_size"], 30)
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

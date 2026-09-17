@@ -410,11 +410,7 @@ class OverlayRenderer:
         return ext.x_advance
 
     def _draw_region_text_cairo(self) -> None:
-        font_size = 20.0
-        line_h = font_size * 1.3
         padding = 8.0
-        libcairo.cairo_select_font_face(self.cairo, self.font_family.encode(), 0, 0)
-        libcairo.cairo_set_font_size(self.cairo, font_size)
         for block in self.region_text.values():
             rect = block["rect"]
             left = rect["x"] * self.width
@@ -424,10 +420,17 @@ class OverlayRenderer:
             text = block["text"]
             if width <= 2 * padding or height <= 2 * padding or not text:
                 continue
+            font_size = float(
+                protocol.sanitize_region_font_size(block.get("font_size"))
+                or protocol.DEFAULT_REGION_FONT_SIZE
+            )
+            line_h = protocol.region_line_height(font_size)
             text_rgba, panel_rgba = protocol.style_colors(block.get("style"))
             libcairo.cairo_save(self.cairo)
             libcairo.cairo_rectangle(self.cairo, left, top, width, height)
             libcairo.cairo_clip(self.cairo)
+            libcairo.cairo_select_font_face(self.cairo, self.font_family.encode(), 0, 0)
+            libcairo.cairo_set_font_size(self.cairo, font_size)
             # Semi-transparent panel fills the exact configured region rectangle.
             libcairo.cairo_set_source_rgba(self.cairo, *panel_rgba)
             libcairo.cairo_rectangle(self.cairo, left, top, width, height)
@@ -760,6 +763,10 @@ def serve(renderer: OverlayRenderer, sock_path: Path, parent_pid: int = 0) -> in
                             block["style"] = (
                                 protocol.sanitize_region_style(payload.get("style")) or protocol.DEFAULT_STYLE
                             )
+                            block["font_size"] = (
+                                protocol.sanitize_region_font_size(payload.get("font_size"))
+                                or protocol.DEFAULT_REGION_FONT_SIZE
+                            )
                             renderer.region_text[str(region_id)] = block
                             renderer.draw()
                         continue
@@ -769,6 +776,14 @@ def serve(renderer: OverlayRenderer, sock_path: Path, parent_pid: int = 0) -> in
                         block = renderer.region_text.get(region_id)
                         if block is not None and style is not None:
                             block["style"] = style
+                            renderer.draw()
+                        continue
+                    if action == "set_region_font_size":
+                        region_id = str(payload.get("region_id", ""))
+                        font_size = protocol.sanitize_region_font_size(payload.get("font_size"))
+                        block = renderer.region_text.get(region_id)
+                        if block is not None and font_size is not None:
+                            block["font_size"] = font_size
                             renderer.draw()
                         continue
                     if action == "hide_region_text":

@@ -8,14 +8,20 @@ import { callable, useQuickAccessVisible } from "@decky/api";
 import { type CSSProperties, useEffect, useRef, useState } from "react";
 import {
   DEFAULT_PANEL_STYLE,
+  DEFAULT_REGION_FONT_SIZE,
   MAX_REGIONS,
+  MAX_REGION_FONT_SIZE,
+  MIN_REGION_FONT_SIZE,
   PANEL_STYLE_BLACK_ON_WHITE,
   PANEL_STYLE_WHITE_ON_BLACK,
+  REGION_FONT_SIZE_STEP,
   canAddRegion,
+  clampRegionFontSize,
   clearRegionPreview,
   describeSource,
   draftsForApply,
   isPanelStyle,
+  isRegionFontSize,
   moveRegion,
   newRegionDraft,
   nextSelectionAfterRemove,
@@ -58,6 +64,17 @@ type PanelStyleResult = {
 const regionPanelStyleGet = callable<[regionId: string], PanelStyleResult>("region_panel_style_get");
 const regionPanelStyleSet = callable<[regionId: string, style: string], PanelStyleResult>("region_panel_style_set");
 
+// Phase 2M.2B runtime-only per-region font size. Not persisted.
+type FontSizeResult = {
+  ok?: boolean;
+  error?: string;
+  detail?: string;
+  region_id?: string;
+  font_size?: number;
+};
+const regionFontSizeGet = callable<[regionId: string], FontSizeResult>("region_font_size_get");
+const regionFontSizeSet = callable<[regionId: string, fontSize: number], FontSizeResult>("region_font_size_set");
+
 // No app_id source exists in the QAM yet, so "This Game" is unavailable.
 const CURRENT_APP_ID: string | null = null;
 
@@ -70,6 +87,7 @@ export function RegionEditorSection() {
   const [error, setError] = useState("");
   const [previewOn, setPreviewOn] = useState(false);
   const [styleByRegion, setStyleByRegion] = useState<Record<string, string>>({});
+  const [fontByRegion, setFontByRegion] = useState<Record<string, number>>({});
   const mounted = useRef(true);
   const previewOnRef = useRef(false);
   const qamVisible = useQuickAccessVisible();
@@ -112,6 +130,7 @@ export function RegionEditorSection() {
   const selected = drafts.find((region) => region.region_id === selectedId) ?? null;
   const primaryId = primaryRegionId(drafts);
   const selectedStyle = (selectedId && styleByRegion[selectedId]) || DEFAULT_PANEL_STYLE;
+  const selectedFontSize = (selectedId && fontByRegion[selectedId]) || DEFAULT_REGION_FONT_SIZE;
 
   // Load the selected region's runtime panel style (session-only, no persistence).
   useEffect(() => {
@@ -148,6 +167,48 @@ export function RegionEditorSection() {
         setError(`Panel style failed: ${String(err)}`);
       }
     }
+  };
+
+  // Load the selected region's runtime font size (session-only, no persistence).
+  useEffect(() => {
+    if (!selectedId) {
+      return;
+    }
+    void (async () => {
+      try {
+        const result = await regionFontSizeGet(selectedId);
+        if (mounted.current && result && result.ok !== false) {
+          const size = isRegionFontSize(result.font_size)
+            ? (result.font_size as number)
+            : DEFAULT_REGION_FONT_SIZE;
+          setFontByRegion((current) => ({ ...current, [selectedId]: size }));
+        }
+      } catch (err) {
+        if (mounted.current) {
+          setError(`Text size failed: ${String(err)}`);
+        }
+      }
+    })();
+  }, [selectedId]);
+
+  const changeFontSize = (value: number) => {
+    if (!selectedId) {
+      return;
+    }
+    const size = clampRegionFontSize(value);
+    setFontByRegion((current) => ({ ...current, [selectedId]: size }));
+    void (async () => {
+      try {
+        const result = await regionFontSizeSet(selectedId, size);
+        if (mounted.current && result && result.ok === false) {
+          setError(result.detail || result.error || "Text size failed");
+        }
+      } catch (err) {
+        if (mounted.current) {
+          setError(`Text size failed: ${String(err)}`);
+        }
+      }
+    })();
   };
 
   // In-QAM draft preview store (also feeds the renderer preview below).
@@ -408,6 +469,17 @@ export function RegionEditorSection() {
               </ButtonItem>
             </div>
           </PanelSectionRow>
+          <PanelSectionRow>
+            <div style={hintStyle}>Text size (this session only)</div>
+          </PanelSectionRow>
+          <GeometrySlider
+            label="Size"
+            min={MIN_REGION_FONT_SIZE}
+            max={MAX_REGION_FONT_SIZE}
+            step={REGION_FONT_SIZE_STEP}
+            value={selectedFontSize}
+            onChange={changeFontSize}
+          />
         </>
       ) : null}
       <PanelSectionRow>
@@ -439,9 +511,10 @@ type GeometrySliderProps = {
   max: number;
   value: number;
   onChange: (value: number) => void;
+  step?: number;
 };
 
-function GeometrySlider({ label, min, max, value, onChange }: GeometrySliderProps) {
+function GeometrySlider({ label, min, max, value, onChange, step }: GeometrySliderProps) {
   return (
     <PanelSectionRow>
       <label style={sliderLabelStyle}>
@@ -450,6 +523,7 @@ function GeometrySlider({ label, min, max, value, onChange }: GeometrySliderProp
           max={max}
           min={min}
           onChange={(event) => onChange(Number(event.currentTarget.value))}
+          step={step}
           style={sliderStyle}
           type="range"
           value={value}

@@ -560,8 +560,10 @@ check("panel: style is session-only (no persistence)", () => {
   assert.equal(regionComponentSrc.includes("localStorage"), false);
   assert.ok(regionComponentSrc.includes("this session only"));
 });
-check("panel: no font-size control added", () => {
-  for (const needle of ["font_size", "set_region_font", "Font size", "fontSize slider"]) {
+check("panel: bounded font-size range, no custom font controls", () => {
+  assert.equal(r.MIN_REGION_FONT_SIZE, 14);
+  assert.equal(r.MAX_REGION_FONT_SIZE, 48);
+  for (const needle of ["fontFamily", "font_family", "fontWeight slider", "line-height"]) {
     assert.equal(regionComponentSrc.includes(needle), false, needle);
   }
 });
@@ -581,6 +583,63 @@ check("panel: no OCR/renderer lifecycle in style path", () => {
 check("panel: editable Region Name not reintroduced", () => {
   assert.equal(regionComponentSrc.includes('type="text"'), false);
   assert.equal(regionComponentSrc.includes("setRegionName"), false);
+});
+
+// -- Phase 2M.2B per-region font size -----------------------------------------
+
+check("font: runtime constants", () => {
+  assert.equal(r.DEFAULT_REGION_FONT_SIZE, 20);
+  assert.equal(r.MIN_REGION_FONT_SIZE, 14);
+  assert.equal(r.MAX_REGION_FONT_SIZE, 48);
+  assert.equal(r.REGION_FONT_SIZE_STEP, 2);
+});
+check("font: validation and clamping", () => {
+  assert.equal(r.isRegionFontSize(20), true);
+  assert.equal(r.isRegionFontSize(14), true);
+  assert.equal(r.isRegionFontSize(48), true);
+  assert.equal(r.isRegionFontSize(13), false);
+  assert.equal(r.isRegionFontSize(49), false);
+  assert.equal(r.isRegionFontSize(20.5), false);
+  assert.equal(r.isRegionFontSize("20"), false);
+  assert.equal(r.clampRegionFontSize(13), 14);
+  assert.equal(r.clampRegionFontSize(49), 48);
+  assert.equal(r.clampRegionFontSize(21), 22);
+  assert.equal(r.clampRegionFontSize(Number.NaN), 20);
+  assert.equal(r.clampRegionFontSize("x"), 20);
+});
+check("font: size RPCs declared once", () => {
+  for (const needle of ["region_font_size_get", "region_font_size_set"]) {
+    assert.equal(countOccurrences(regionComponentSrc, `"${needle}"`), 1, needle);
+  }
+});
+check("font: slider min/max/step wired", () => {
+  assert.ok(regionComponentSrc.includes("min={MIN_REGION_FONT_SIZE}"));
+  assert.ok(regionComponentSrc.includes("max={MAX_REGION_FONT_SIZE}"));
+  assert.ok(regionComponentSrc.includes("step={REGION_FONT_SIZE_STEP}"));
+  assert.ok(regionComponentSrc.includes("value={selectedFontSize}"));
+});
+check("font: targets selected region_id", () => {
+  assert.ok(regionComponentSrc.includes("regionFontSizeSet(selectedId, size)"));
+});
+check("font: state keyed by region_id", () => {
+  assert.ok(regionComponentSrc.includes("fontByRegion"));
+  assert.ok(regionComponentSrc.includes("fontByRegion[selectedId]"));
+});
+check("font: reloads on selection change", () => {
+  assert.ok(regionComponentSrc.includes("regionFontSizeGet(selectedId)"));
+});
+check("font: style selector preserved", () => {
+  assert.ok(regionComponentSrc.includes("regionPanelStyleSet(selectedId, style)"));
+  assert.ok(regionComponentSrc.includes("panelStyleLabel"));
+});
+check("font: no persistence", () => {
+  assert.equal(regionComponentSrc.includes("overlay_presentation"), false);
+  assert.equal(regionComponentSrc.includes("localStorage"), false);
+});
+check("font: no scroll/touch controls", () => {
+  for (const needle of ["scroll_offset", "Scroll Up", "Scroll Down", "region_scroll", "touch"]) {
+    assert.equal(regionComponentSrc.includes(needle), false, needle);
+  }
 });
 
 if (process.exitCode) {

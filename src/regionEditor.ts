@@ -272,3 +272,27 @@ export function isPanelStyle(value: unknown): boolean {
 export function panelStyleLabel(style: string | null | undefined): string {
   return style === PANEL_STYLE_BLACK_ON_WHITE ? "Light panel" : "Dark panel";
 }
+
+// -- Phase 2M.2B runtime font size (session-only; never persisted) ------------
+
+export const DEFAULT_REGION_FONT_SIZE = 20;
+export const MIN_REGION_FONT_SIZE = 14;
+export const MAX_REGION_FONT_SIZE = 48;
+export const REGION_FONT_SIZE_STEP = 2;
+
+export function isRegionFontSize(value: unknown): boolean {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= MIN_REGION_FONT_SIZE &&
+    value <= MAX_REGION_FONT_SIZE
+  );
+}
+
+export function clampRegionFontSize(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_REGION_FONT_SIZE;
+  }
+  const stepped = Math.round(value / REGION_FONT_SIZE_STEP) * REGION_FONT_SIZE_STEP;
+  return Math.min(MAX_REGION_FONT_SIZE, Math.max(MIN_REGION_FONT_SIZE, stepped));
+}

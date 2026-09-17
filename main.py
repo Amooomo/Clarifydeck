@@ -36,6 +36,7 @@ except Exception:  # pragma: no cover - optional at import time
     overlay_protocol = None  # type: ignore[assignment]
 
 _DEFAULT_PANEL_STYLE = getattr(overlay_protocol, "DEFAULT_STYLE", "white_on_black")
+_DEFAULT_REGION_FONT_SIZE = getattr(overlay_protocol, "DEFAULT_REGION_FONT_SIZE", 20)
 
 try:
     from backend_leader import BackgroundLeaderLease, LeaderAcquireResult
@@ -699,6 +700,26 @@ class ClarifyDeckEngine:
         except Exception as exc:
             decky.logger.error(f"region panel style set failed: {exc}")
             return {"ok": False, "error": "region_panel_style_failed", "detail": str(exc)}
+
+    # -- Phase 2M.2B runtime per-region font size (no persistence) ----------
+
+    async def region_font_size_get(self, region_id: str) -> dict[str, Any]:
+        if self._overlay is None:
+            return {"ok": True, "region_id": str(region_id), "font_size": _DEFAULT_REGION_FONT_SIZE}
+        try:
+            return await self._overlay.get_region_font_size(region_id)
+        except Exception as exc:
+            decky.logger.error(f"region font size get failed: {exc}")
+            return {"ok": False, "error": "region_font_size_failed", "detail": str(exc)}
+
+    async def region_font_size_set(self, region_id: str, font_size: Any) -> dict[str, Any]:
+        if self._role != "leader" or self._overlay is None:
+            return {"ok": False, "error": "overlay_unavailable"}
+        try:
+            return await self._overlay.set_region_font_size(region_id, font_size)
+        except Exception as exc:
+            decky.logger.error(f"region font size set failed: {exc}")
+            return {"ok": False, "error": "region_font_size_failed", "detail": str(exc)}
 
     def capture_test(self, mode: str = "base_plane_only", output: str = "") -> dict[str, Any]:
         """One-shot capture isolation test. Never starts a loop, OCR or overlay."""
@@ -1572,6 +1593,12 @@ class Plugin:
 
     async def region_panel_style_set(self, region_id: str, style: str) -> dict[str, Any]:
         return await get_engine().region_panel_style_set(region_id, style)
+
+    async def region_font_size_get(self, region_id: str) -> dict[str, Any]:
+        return await get_engine().region_font_size_get(region_id)
+
+    async def region_font_size_set(self, region_id: str, font_size: int) -> dict[str, Any]:
+        return await get_engine().region_font_size_set(region_id, font_size)
 
     async def capture_test_base_plane(self, output: str = "") -> dict[str, Any]:
         loop = asyncio.get_event_loop()

@@ -360,6 +360,107 @@ class RegionPanelStyleTest(unittest.TestCase):
             self.assertEqual("".join(visible), text)
 
 
+class RegionFontSizeTest(unittest.TestCase):
+    """Phase 2M.2B: per-region font size, rewrap, capacity, short-region guard."""
+
+    def _measure(self, font_size: float):
+        # Approximate cairo advance width (~0.6 * font size per character).
+        return lambda candidate: len(candidate) * font_size * 0.6
+
+    def test_default_and_range_constants(self) -> None:
+        self.assertEqual(protocol.DEFAULT_REGION_FONT_SIZE, 20)
+        self.assertEqual(protocol.MIN_REGION_FONT_SIZE, 14)
+        self.assertEqual(protocol.MAX_REGION_FONT_SIZE, 48)
+        self.assertEqual(protocol.REGION_FONT_SIZE_STEP, 2)
+
+    def test_valid_font_sizes(self) -> None:
+        for size in (14, 20, 48, 20.0, 30.0):
+            self.assertEqual(protocol.sanitize_region_font_size(size), int(size))
+
+    def test_invalid_font_sizes_rejected(self) -> None:
+        for bad in (
+            13,
+            49,
+            0,
+            -2,
+            20.5,
+            "20",
+            "",
+            None,
+            True,
+            False,
+            float("nan"),
+            float("inf"),
+            {},
+            [],
+        ):
+            self.assertIsNone(protocol.sanitize_region_font_size(bad), bad)
+
+    def test_line_height_follows_font(self) -> None:
+        self.assertAlmostEqual(protocol.region_line_height(20), 26.0)
+        self.assertAlmostEqual(protocol.region_line_height(14), 18.2)
+        self.assertAlmostEqual(protocol.region_line_height(48), 62.4)
+
+    def test_20px_capacity_compatibility(self) -> None:
+        inner_h = 0.13 * 800 - 16  # 88px
+        self.assertEqual(
+            protocol.clip_lines(["a", "b", "c", "d"], protocol.region_line_height(20), inner_h),
+            ["a", "b", "c"],
+        )
+
+    def test_capacity_recalculated_with_font(self) -> None:
+        inner_h = 0.13 * 800 - 16
+        source = ["a", "b", "c", "d", "e"]
+        self.assertEqual(len(protocol.clip_lines(source, protocol.region_line_height(14), inner_h)), 4)
+        self.assertEqual(len(protocol.clip_lines(source, protocol.region_line_height(20), inner_h)), 3)
+        self.assertEqual(len(protocol.clip_lines(source, protocol.region_line_height(30), inner_h)), 2)
+
+    def test_smaller_font_wraps_fewer_lines(self) -> None:
+        text = "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG 0123456789"
+        width = 150.0
+        lines_16 = protocol.wrap_text(text, width, self._measure(16))
+        lines_30 = protocol.wrap_text(text, width, self._measure(30))
+        self.assertLess(len(lines_16), len(lines_30))
+        self.assertEqual("".join(lines_16), text)
+        self.assertEqual("".join(lines_30), text)
+
+    def test_short_region_renders_at_every_font(self) -> None:
+        inner_h = 0.04 * 800 - 16  # 16px
+        self.assertGreater(inner_h, 0)
+        for font_size in (14, 20, 32, 48):
+            lines = protocol.wrap_text("PRESS START", 100.0, self._measure(font_size))
+            visible = protocol.clip_lines(lines, protocol.region_line_height(font_size), inner_h)
+            self.assertGreaterEqual(len(visible), 1, font_size)
+
+    def test_panel_geometry_independent_of_font(self) -> None:
+        rect = {"x": 0.14, "y": 0.76, "w": 0.13, "h": 0.04}
+        self.assertEqual(
+            protocol.preview_pixel_rect(rect, 1280, 800),
+            protocol.preview_pixel_rect(rect, 1280, 800),
+        )
+
+    def test_cjk_at_multiple_sizes(self) -> None:
+        text = "九州一番星店长"
+        for font_size in (14, 20, 32, 48):
+            lines = protocol.wrap_text(text, 1000.0, self._measure(font_size))
+            visible = protocol.clip_lines(lines, protocol.region_line_height(font_size), 16.0)
+            self.assertGreaterEqual(len(visible), 1, font_size)
+            self.assertEqual("".join(visible), text)
+
+    def test_two_regions_independent_capacity(self) -> None:
+        a_inner = 0.04 * 800 - 16
+        b_inner = 0.13 * 800 - 16
+        a_visible = protocol.clip_lines(["a1", "a2"], protocol.region_line_height(16), a_inner)
+        b_visible = protocol.clip_lines(["b1", "b2", "b3", "b4"], protocol.region_line_height(30), b_inner)
+        self.assertEqual(a_visible, ["a1"])
+        self.assertEqual(b_visible, ["b1", "b2"])
+
+    def test_style_independent_of_font(self) -> None:
+        text_rgba, panel_rgba = protocol.style_colors(protocol.STYLE_BLACK_ON_WHITE)
+        self.assertEqual(text_rgba, (0.0, 0.0, 0.0, 1.0))
+        self.assertEqual(panel_rgba[3], protocol.PANEL_ALPHA)
+
+
 class SpyDelivery:
     def __init__(self):
         self.sessions = []

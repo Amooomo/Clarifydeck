@@ -1758,7 +1758,19 @@ Accepted lifecycle observation (frozen, not part of any gate):
 
 ## Phase 2M.2A — Per-Region Semi-Transparent Text Panels
 
-Status: LOCAL PASS / DEVICE RETEST PENDING
+Status: DEVICE PASS / CLOSED
+
+Device validation (from `69ef7807ec7041505be3aa441a3fa584b35b84cd`):
+- `h=0.04` short Region remained readable with panel
+- two inverse styles worked simultaneously
+- live style update remained per-region
+- clear removed only the target region panel/text
+- Preview + panels coexisted
+- Persistent Overlay OFF removed panels and kept Preview
+- accepted no-replay behavior remained
+- no OCR restart from style changes
+- runtime style reset on restart as designed
+- no new Python Exception / renderer lifecycle regression
 
 - every visible per-region OCR text block now draws a semi-transparent panel
   filling its exact configured region rectangle, with the text on top; the
@@ -1789,6 +1801,43 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
   schema change, no new settings file. No OCR/transport/change-gate/capture
   changes; no scrolling; no touch/input work; renderer ownership and the
   no-replay lifecycle are unchanged.
+
+## Phase 2M.2B — Per-Region Font Size
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+- per-region runtime font size, keyed by stable `region_id` (never
+  index/label/order), default `20`. Runtime/in-memory only:
+  `OverlayManager._region_font_size` remembers a region's size across text
+  updates, clear/hide, and overlay disable/enable within one backend lifetime;
+  it resets to `20` on backend restart.
+- bounded and validated range `14 .. 48` (integer; UI step `2`). `protocol.
+  sanitize_region_font_size` accepts only in-range integers (or integral finite
+  floats) and rejects bools, non-numeric types, non-integral floats, NaN/Infinity,
+  and out-of-range values. Invalid input is rejected with `ok:false`,
+  `error:"invalid_font_size"`, previous value preserved, no partial mutation.
+- line height keeps the frozen rule `font_size * 1.3`
+  (`protocol.region_line_height`). The renderer sets the cairo font per block and
+  rewraps the block's full retained text, so a size change reruns
+  wrap/line-height/capacity/clip from the original text (not a scale of
+  precomputed lines). Exact panel geometry and style are untouched.
+- `set_region_text` carries the region's effective `font_size`; a narrow
+  `set_region_font_size {region_id, font_size}` renderer command updates an
+  already-visible block live. A font change never creates an empty panel, never
+  starts/stops OCR, never starts the renderer, never changes geometry, and never
+  changes style.
+- narrow backend API: `region_font_size_get(region_id)` (missing -> `20`) and
+  `region_font_size_set(region_id, font_size)` (validated range).
+- minimal QAM slider on the selected region ("Size", min 14 / max 48 / step 2,
+  session-only). Selection change reloads that region's runtime size; the style
+  selector is preserved and independent.
+- 2M.1.1 short-region guard preserved at every allowed size: `h=0.04` still
+  schedules at least one clipped line at 14/20/32/48; a large font may be heavily
+  clipped but never produces a panel with no text.
+- no persistence: no `overlay_presentation.json`, no `recognition_roi.json`
+  schema change, no new settings file. No OCR/stabilizer/change-gate/transport/
+  capture changes; no scrolling; no touch/input work; panel alpha and styles
+  unchanged; renderer ownership and the no-replay lifecycle unchanged.
 
 ## Phase 2C.2 Wayland environment
 

@@ -28,6 +28,12 @@ STYLES = (STYLE_WHITE_ON_BLACK, STYLE_BLACK_ON_WHITE)
 DEFAULT_STYLE = STYLE_WHITE_ON_BLACK
 PANEL_ALPHA = 0.65
 
+# Phase 2M.2B per-region font size. Runtime-only: never persisted.
+DEFAULT_REGION_FONT_SIZE = 20
+MIN_REGION_FONT_SIZE = 14
+MAX_REGION_FONT_SIZE = 48
+REGION_FONT_SIZE_STEP = 2
+
 
 def runtime_dir() -> Path:
     override = os.environ.get("CLARIFYDECK_OVERLAY_RUNTIME_DIR")
@@ -174,6 +180,33 @@ def style_colors(style: Any) -> tuple[tuple[float, float, float, float], tuple[f
     if style == STYLE_BLACK_ON_WHITE:
         return (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0, PANEL_ALPHA)
     return (1.0, 1.0, 1.0, 1.0), (0.0, 0.0, 0.0, PANEL_ALPHA)
+
+
+def sanitize_region_font_size(value: Any) -> Optional[int]:
+    """Validate a per-region font size; return a canonical integer or None.
+
+    Accepts only an in-range integer (or an integral finite float). Rejects
+    bools, non-numeric types, non-integral floats, NaN/Infinity, and values
+    outside ``MIN_REGION_FONT_SIZE .. MAX_REGION_FONT_SIZE``.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        size = value
+    elif isinstance(value, float):
+        if not math.isfinite(value) or value != int(value):
+            return None
+        size = int(value)
+    else:
+        return None
+    if size < MIN_REGION_FONT_SIZE or size > MAX_REGION_FONT_SIZE:
+        return None
+    return size
+
+
+def region_line_height(font_size: float) -> float:
+    """Existing region-text line-height rule (unchanged from the 20px baseline)."""
+    return float(font_size) * 1.3
 
 
 def wrap_text(text: str, max_width: float, measure: Any) -> list[str]:

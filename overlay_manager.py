@@ -23,7 +23,7 @@ import sys
 import time
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 try:
     import decky
@@ -199,6 +199,8 @@ class OverlayManager:
         self._region_text: dict = {}
         # Phase 2M.2A runtime-only per-region panel style (never persisted).
         self._region_style: dict = {}
+        # Phase 2M.2B runtime-only per-region font size (never persisted).
+        self._region_font_size: dict = {}
 
     # -- identity ----------------------------------------------------------
 
@@ -358,7 +360,13 @@ class OverlayManager:
         async with self._lock:
             key = str(region_id)
             style = self._region_style.get(key, protocol.DEFAULT_STYLE)
-            self._region_text[key] = {"rect": tuple(rect), "text": text, "style": style}
+            font_size = self._region_font_size.get(key, protocol.DEFAULT_REGION_FONT_SIZE)
+            self._region_text[key] = {
+                "rect": tuple(rect),
+                "text": text,
+                "style": style,
+                "font_size": font_size,
+            }
             if self._text_enabled and self._state == OverlayState.RUNNING:
                 x, y, w, h = rect
                 self._send(
@@ -368,6 +376,7 @@ class OverlayManager:
                         "rect": {"x": x, "y": y, "w": w, "h": h},
                         "text": text,
                         "style": style,
+                        "font_size": font_size,
                     }
                 )
             return self.status()
@@ -402,6 +411,37 @@ class OverlayManager:
                 self._region_text[key]["style"] = normalized
                 self._send({"type": "set_region_style", "region_id": key, "style": normalized})
             return {"ok": True, "region_id": key, "style": normalized}
+
+    async def get_region_font_size(self, region_id: str) -> dict:
+        async with self._lock:
+            key = str(region_id) if region_id is not None else ""
+            return {
+                "ok": True,
+                "region_id": key,
+                "font_size": self._region_font_size.get(key, protocol.DEFAULT_REGION_FONT_SIZE),
+            }
+
+    async def set_region_font_size(self, region_id: str, font_size: Any) -> dict:
+        """Remember a region's runtime font size; update a visible block live.
+
+        Never starts/stops OCR or the renderer, never changes geometry or style,
+        and never creates an empty panel when no text block exists for the region.
+        """
+        async with self._lock:
+            key = str(region_id) if region_id is not None else ""
+            normalized = protocol.sanitize_region_font_size(font_size)
+            if not key or normalized is None:
+                return {
+                    "ok": False,
+                    "error": "invalid_font_size",
+                    "region_id": key,
+                    "font_size": self._region_font_size.get(key, protocol.DEFAULT_REGION_FONT_SIZE),
+                }
+            self._region_font_size[key] = normalized
+            if self._state == OverlayState.RUNNING and key in self._region_text:
+                self._region_text[key]["font_size"] = normalized
+                self._send({"type": "set_region_font_size", "region_id": key, "font_size": normalized})
+            return {"ok": True, "region_id": key, "font_size": normalized}
 
     async def hide_region_text(self, region_id: str) -> dict:
         async with self._lock:
