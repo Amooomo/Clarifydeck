@@ -31,6 +31,14 @@ MAX_AUDIT_RECORDS = 16
 MAX_AUDIT_SAVINGS = 64
 AUDIT_CONFIDENCE_BUCKETS = ("0.70-0.79", "0.80-0.89", "0.90-0.94", "0.95-1.00")
 
+# Phase 2N.5A: conservative fast accept for high-confidence *replacements* only.
+# Derived from Phase 2N.4 device evidence (48/48 first candidates matched final at
+# first_conf >= 0.95). Never applies to initial publication and never replaces the
+# existing consensus fallback for lower-confidence candidates.
+FAST_ACCEPT_MIN_CONFIDENCE = 0.95
+MAX_FAST_ACCEPT_RECORDS = 16
+MAX_FAST_ACCEPT_SAVINGS = 64
+
 _INNER_SPACE_RE = re.compile(r"[ \t]+")
 
 
@@ -75,8 +83,21 @@ class StabilizerAuditStats:
     clear_transitions: int = 0
     first_matches_final: int = 0
     first_differs_from_final: int = 0
+    # Phase 2N.5A: transitions whose final acceptance was a fast accept. Kept
+    # separate so the historical consensus=2 reliability metric is not misread.
+    fast_accept_transitions: int = 0
     # bucket label -> {"count", "matches", "saving_ms_sum"}
     confidence_buckets: dict = field(default_factory=dict)
+
+
+@dataclass
+class FastAcceptStats:
+    """Phase 2N.5A per-region fast-accept diagnostics (runtime-only)."""
+
+    fast_accept_total: int = 0
+    fast_accept_next_match: int = 0
+    fast_accept_next_diff: int = 0
+    fallback_accept_total: int = 0
 
 
 def _audit_digest(text: str) -> str:
@@ -152,6 +173,19 @@ class OCRStabilizer:
         self._audit_recent: deque = deque(maxlen=MAX_AUDIT_RECORDS)
         self._audit_savings: deque = deque(maxlen=MAX_AUDIT_SAVINGS)
         self._audit_stats = StabilizerAuditStats()
+        # Phase 2N.5A conservative high-confidence fast accept (per region).
+        # `_fast_accept_lock` holds the fast-accepted text while it awaits its
+        # immediate next eligible candidate (anti-flapping guard); `_fast_trial_text`
+        # is the first differing eligible candidate after the current Stable Text
+        # (condition 6: only the first candidate of a replacement trial is eligible).
+        self._fast_accept_lock: Optional[str] = None
+        self._fast_accept_pending: Optional[dict] = None
+        self._fast_accept_emit_pending: Optional[dict] = None
+        self._fast_accept_confirm_pending: Optional[dict] = None
+        self._fast_trial_text: Optional[str] = None
+        self._fast_accept_recent: deque = deque(maxlen=MAX_FAST_ACCEPT_RECORDS)
+        self._fast_accept_savings: deque = deque(maxlen=MAX_FAST_ACCEPT_SAVINGS)
+        self._fast_accept_stats = FastAcceptStats()
 
     # -- validation --------------------------------------------------------
 
@@ -263,13 +297,119 @@ class OCRStabilizer:
         self._last_consensus = sum(1 for item in self._history if item.text == candidate.text)
         self._audit_observe(candidate)
 
+        # Phase 2N.5A fast-accept bookkeeping. Runs before the consensus path so
+        # the shadow confirmation observes the immediate next eligible candidate
+        # without ever delaying an already-published text.
+        self._fast_accept_resolve_pending(candidate, now)
+        self._fast_accept_update_trial(candidate)
+        if self._fast_accept_eligible(candidate):
+            return self._fast_accept(candidate, now)
+
         if self._last_consensus < self._consensus_required:
             return []
         if candidate.text == self._last_emitted_text:
             self._stats.duplicate_suppressed += 1
             return []
         self._audit_finalize(candidate, now)
+        self._fast_accept_on_consensus_accept()
         self._last_emitted_text = candidate.text
+        self._fast_trial_text = None
+        self._stats.stable_text_emits += 1
+        self._fast_accept_stats.fallback_accept_total += 1
+        return [
+            StableTextEvent(
+                kind="text",
+                text=candidate.text,
+                confidence=candidate.confidence,
+                source_seq=candidate.source_seq,
+                timestamp_monotonic=now,
+            )
+        ]
+
+    # -- Phase 2N.5A conservative high-confidence fast accept --------------
+
+    def _fast_accept_eligible(self, candidate: OCRCandidate) -> bool:
+        """Conservative replacement-only predicate (all conditions must hold)."""
+        if not self._last_emitted_text:
+            # No existing Stable Text yet: initial publication stays consensus=2.
+            return False
+        if candidate.text == self._last_emitted_text:
+            return False
+        if candidate.confidence < FAST_ACCEPT_MIN_CONFIDENCE:
+            return False
+        if self._fast_accept_lock is not None:
+            # Post-fast-accept lock: wait for confirmation (anti-flapping).
+            return False
+        if self._fast_trial_text is None or candidate.text != self._fast_trial_text:
+            # Not the first eligible candidate of this replacement trial.
+            return False
+        return True
+
+    def _fast_accept_update_trial(self, candidate: OCRCandidate) -> None:
+        """Track the first differing eligible candidate after the Stable Text."""
+        current = self._last_emitted_text
+        if current is None:
+            self._fast_trial_text = None
+            return
+        if candidate.text == current:
+            # Stable Text re-observed: the replacement trial is over.
+            self._fast_trial_text = None
+            return
+        if self._fast_trial_text is None:
+            self._fast_trial_text = candidate.text
+
+    def _fast_accept_resolve_pending(self, candidate: OCRCandidate, now: float) -> None:
+        """Shadow-confirm the most recent fast accept with the next eligible candidate.
+
+        Diagnostic only: never delays or rolls back the published text. A matching
+        next candidate releases the fast-path lock; a differing one leaves the lock
+        in place until the ordinary consensus path accepts a different value.
+        """
+        pending = self._fast_accept_pending
+        if pending is None:
+            return
+        self._fast_accept_pending = None
+        matches = candidate.text == pending["text"]
+        elapsed_ms = round((now - pending["timestamp"]) * 1000.0, 3)
+        record = {
+            "region_id": self.audit_region_id,
+            "match": matches,
+            "next_confidence": candidate.confidence,
+            "next_frame_seq": candidate.source_seq,
+            "first_confidence": pending["confidence"],
+            "source_seq": pending["source_seq"],
+            "elapsed_ms": elapsed_ms,
+        }
+        self._fast_accept_recent.append(record)
+        self._fast_accept_confirm_pending = record
+        self._fast_accept_savings.append(elapsed_ms)
+        if matches:
+            self._fast_accept_stats.fast_accept_next_match += 1
+            if self._fast_accept_lock == pending["text"]:
+                self._fast_accept_lock = None
+        else:
+            self._fast_accept_stats.fast_accept_next_diff += 1
+
+    def _fast_accept(self, candidate: OCRCandidate, now: float) -> list:
+        previous_stable = self._last_emitted_text
+        self._audit_finalize(candidate, now, fast_accept=True)
+        self._fast_accept_stats.fast_accept_total += 1
+        self._fast_accept_lock = candidate.text
+        self._fast_accept_pending = {
+            "text": candidate.text,
+            "confidence": candidate.confidence,
+            "source_seq": candidate.source_seq,
+            "timestamp": now,
+        }
+        self._fast_accept_emit_pending = {
+            "region_id": self.audit_region_id,
+            "frame_seq": candidate.source_seq,
+            "confidence": candidate.confidence,
+            "previous_stable": 1 if previous_stable else 0,
+            "threshold": FAST_ACCEPT_MIN_CONFIDENCE,
+        }
+        self._last_emitted_text = candidate.text
+        self._fast_trial_text = None
         self._stats.stable_text_emits += 1
         return [
             StableTextEvent(
@@ -281,6 +421,50 @@ class OCRStabilizer:
             )
         ]
 
+    def _fast_accept_on_consensus_accept(self) -> None:
+        # Ordinary consensus accepted a value: release any fast-path lock.
+        if self._fast_accept_lock is not None:
+            self._fast_accept_lock = None
+
+    def _fast_accept_on_clear(self) -> None:
+        self._fast_accept_lock = None
+        self._fast_accept_pending = None
+        self._fast_trial_text = None
+
+    def take_fast_accept_record(self) -> Optional[dict]:
+        record = self._fast_accept_emit_pending
+        self._fast_accept_emit_pending = None
+        return record
+
+    def take_fast_accept_confirm(self) -> Optional[dict]:
+        record = self._fast_accept_confirm_pending
+        self._fast_accept_confirm_pending = None
+        return record
+
+    def fast_accept_recent(self) -> list:
+        return list(self._fast_accept_recent)
+
+    def fast_accept_summary(self) -> dict:
+        stats = self._fast_accept_stats
+        match = stats.fast_accept_next_match
+        diff = stats.fast_accept_next_diff
+        resolved = match + diff
+        savings = sorted(self._fast_accept_savings)
+        return {
+            "region_id": self.audit_region_id,
+            "fast_accept_total": stats.fast_accept_total,
+            "fast_accept_next_match": match,
+            "fast_accept_next_diff": diff,
+            "fast_accept_confirm_rate": round(match / resolved, 4) if resolved else None,
+            "fallback_accept_total": stats.fallback_accept_total,
+            "median_fast_accept_saving_ms": savings[len(savings) // 2] if savings else None,
+            "threshold": FAST_ACCEPT_MIN_CONFIDENCE,
+        }
+
+    @property
+    def fast_accept_locked(self) -> bool:
+        return self._fast_accept_lock is not None
+
     def _maybe_clear(self, now) -> list:
         if self._last_emitted_text is None or self._clear_emitted or self._last_activity is None:
             return []
@@ -290,6 +474,7 @@ class OCRStabilizer:
         self._last_emitted_text = None
         self._stats.clear_emits += 1
         self._audit_note_clear()
+        self._fast_accept_on_clear()
         return [
             StableTextEvent(
                 kind="clear",
@@ -317,6 +502,14 @@ class OCRStabilizer:
         self._audit_recent.clear()
         self._audit_savings.clear()
         self._audit_stats = StabilizerAuditStats()
+        self._fast_accept_lock = None
+        self._fast_accept_pending = None
+        self._fast_accept_emit_pending = None
+        self._fast_accept_confirm_pending = None
+        self._fast_trial_text = None
+        self._fast_accept_recent.clear()
+        self._fast_accept_savings.clear()
+        self._fast_accept_stats = FastAcceptStats()
 
     def stats(self) -> StabilizerStats:
         return self._stats
@@ -377,6 +570,7 @@ class OCRStabilizer:
             "clear_transitions": stats.clear_transitions,
             "first_matches_final": stats.first_matches_final,
             "first_differs_from_final": stats.first_differs_from_final,
+            "fast_accept_transitions": stats.fast_accept_transitions,
             "match_rate": round(stats.first_matches_final / total, 4) if total else None,
             "median_first_to_accept_ms": median,
             "confidence_buckets": {key: dict(value) for key, value in stats.confidence_buckets.items()},
@@ -403,7 +597,7 @@ class OCRStabilizer:
             self._audit_trial["count"] += 1
             self._audit_trial["distinct"].add(candidate.text)
 
-    def _audit_finalize(self, candidate: OCRCandidate, now: float) -> None:
+    def _audit_finalize(self, candidate: OCRCandidate, now: float, fast_accept: bool = False) -> None:
         trial = self._audit_trial
         if trial is None:
             trial = {
@@ -427,6 +621,7 @@ class OCRStabilizer:
             "first_candidate_confidence": trial["confidence"],
             "accepted_candidate_confidence": candidate.confidence,
             "first_matches_final": matches,
+            "fast_accept": fast_accept,
             "first_candidate_length": trial["length"],
             "final_length": len(candidate.text),
             "first_candidate_to_accept_ms": first_to_accept_ms,
@@ -441,6 +636,8 @@ class OCRStabilizer:
         self._audit_savings.append(first_to_accept_ms)
         stats = self._audit_stats
         stats.transitions_total += 1
+        if fast_accept:
+            stats.fast_accept_transitions += 1
         if matches:
             stats.first_matches_final += 1
         else:

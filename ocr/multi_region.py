@@ -23,7 +23,7 @@ from typing import Any, Callable, Iterable, Optional
 from capture.change_detector import decode_png_ex
 from capture.recognition_regions import RecognitionRegion
 from capture.roi import NormalizedROI, PixelROI, crop_rgba, resolve_roi
-from ocr.stabilizer import OCRStabilizer, StableTextEvent
+from ocr.stabilizer import FAST_ACCEPT_MIN_CONFIDENCE, OCRStabilizer, StableTextEvent
 
 # Phase 2N.3: bounded, runtime-only latency samples for changed Stable Text.
 MAX_LATENCY_SAMPLES = 8
@@ -127,6 +127,7 @@ class MultiRegionOCRCoordinator:
             "clear_transitions": 0,
             "first_matches_final": 0,
             "first_differs_from_final": 0,
+            "fast_accept_transitions": 0,
             "confidence_buckets": {},
         }
         savings: list[float] = []
@@ -136,6 +137,7 @@ class MultiRegionOCRCoordinator:
             merged["clear_transitions"] += summary["clear_transitions"]
             merged["first_matches_final"] += summary["first_matches_final"]
             merged["first_differs_from_final"] += summary["first_differs_from_final"]
+            merged["fast_accept_transitions"] += summary.get("fast_accept_transitions", 0)
             for key, value in summary["confidence_buckets"].items():
                 entry = merged["confidence_buckets"].setdefault(
                     key, {"count": 0, "matches": 0, "saving_ms_sum": 0.0}
@@ -148,6 +150,56 @@ class MultiRegionOCRCoordinator:
         merged["match_rate"] = round(merged["first_matches_final"] / total, 4) if total else None
         savings.sort()
         merged["median_first_to_accept_ms"] = savings[len(savings) // 2] if savings else None
+        merged["regions"] = len(self._states)
+        return merged
+
+    # -- Phase 2N.5A fast-accept diagnostics (observational) ---------------
+
+    def drain_fast_accept(self) -> list[dict]:
+        """Return and clear pending fast-accept emit records (per region)."""
+        records = []
+        for state in self._states.values():
+            record = state.stabilizer.take_fast_accept_record()
+            if record is not None:
+                records.append(record)
+        return records
+
+    def drain_fast_accept_confirm(self) -> list[dict]:
+        """Return and clear pending fast-accept shadow-confirmation records."""
+        records = []
+        for state in self._states.values():
+            record = state.stabilizer.take_fast_accept_confirm()
+            if record is not None:
+                records.append(record)
+        return records
+
+    def fast_accept_recent(self) -> list[dict]:
+        records: list[dict] = []
+        for state in self._states.values():
+            records.extend(state.stabilizer.fast_accept_recent())
+        return records[-MAX_LATENCY_SAMPLES:]
+
+    def fast_accept_summary(self) -> dict:
+        merged = {
+            "fast_accept_total": 0,
+            "fast_accept_next_match": 0,
+            "fast_accept_next_diff": 0,
+            "fallback_accept_total": 0,
+        }
+        savings: list[float] = []
+        for state in self._states.values():
+            summary = state.stabilizer.fast_accept_summary()
+            for key in ("fast_accept_total", "fast_accept_next_match", "fast_accept_next_diff", "fallback_accept_total"):
+                merged[key] += summary[key]
+            if summary["median_fast_accept_saving_ms"] is not None:
+                savings.append(summary["median_fast_accept_saving_ms"])
+        resolved = merged["fast_accept_next_match"] + merged["fast_accept_next_diff"]
+        merged["fast_accept_confirm_rate"] = (
+            round(merged["fast_accept_next_match"] / resolved, 4) if resolved else None
+        )
+        savings.sort()
+        merged["median_fast_accept_saving_ms"] = savings[len(savings) // 2] if savings else None
+        merged["threshold"] = FAST_ACCEPT_MIN_CONFIDENCE
         merged["regions"] = len(self._states)
         return merged
 

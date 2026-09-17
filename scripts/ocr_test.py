@@ -276,6 +276,37 @@ class OCRDiagnostic:
                 print("[ocr-stable] emit=clear", flush=True)
         self._emit_stable_events(events)
         self._emit_ocr_evidence(result)
+        self._emit_fast_accept_single(self.stabilizer)
+
+    def _emit_fast_accept_single(self, stabilizer) -> None:
+        """Phase 2N.5A diagnostics for the single-region stabilizer path."""
+        if stabilizer is None:
+            return
+        record = stabilizer.take_fast_accept_record()
+        if record is not None:
+            print(
+                "[fast-accept] region={region} frame={frame} conf={conf} "
+                "previous_stable={prev} threshold={threshold}".format(
+                    region=record.get("region_id"),
+                    frame=record.get("frame_seq"),
+                    conf=record.get("confidence"),
+                    prev=record.get("previous_stable"),
+                    threshold=record.get("threshold"),
+                ),
+                flush=True,
+            )
+        confirm = stabilizer.take_fast_accept_confirm()
+        if confirm is not None:
+            print(
+                "[fast-accept-confirm] region={region} match={match} "
+                "next_conf={conf} elapsed_ms={elapsed}".format(
+                    region=confirm.get("region_id"),
+                    match=1 if confirm.get("match") else 0,
+                    conf=confirm.get("next_confidence"),
+                    elapsed=confirm.get("elapsed_ms"),
+                ),
+                flush=True,
+            )
 
     def _diagnostic_enabled(self) -> bool:
         return bool(getattr(self.args, "diagnostic_ocr_evidence", False))
@@ -439,6 +470,33 @@ class OCRDiagnostic:
                     distinct=record.get("intermediate_distinct_candidate_count"),
                     first_to=record.get("first_candidate_to_accept_ms"),
                     saving=record.get("theoretical_fast_accept_saving_ms"),
+                ),
+                flush=True,
+            )
+
+        # Phase 2N.5A: one concise fast-accept line per high-confidence replacement
+        # and one shadow-confirmation line per resolved fast accept (stderr only;
+        # no text content is logged).
+        for record in self._multi_region_coordinator.drain_fast_accept():
+            print(
+                "[fast-accept] region={region} frame={frame} conf={conf} "
+                "previous_stable={prev} threshold={threshold}".format(
+                    region=record.get("region_id"),
+                    frame=record.get("frame_seq"),
+                    conf=record.get("confidence"),
+                    prev=record.get("previous_stable"),
+                    threshold=record.get("threshold"),
+                ),
+                flush=True,
+            )
+        for record in self._multi_region_coordinator.drain_fast_accept_confirm():
+            print(
+                "[fast-accept-confirm] region={region} match={match} "
+                "next_conf={conf} elapsed_ms={elapsed}".format(
+                    region=record.get("region_id"),
+                    match=1 if record.get("match") else 0,
+                    conf=record.get("next_confidence"),
+                    elapsed=record.get("elapsed_ms"),
                 ),
                 flush=True,
             )
@@ -832,8 +890,12 @@ class OCRDiagnostic:
                 print(
                     f"[stabilizer-audit-summary] {self._multi_region_coordinator.audit_summary()}"
                 )
+                print(
+                    f"[fast-accept-summary] {self._multi_region_coordinator.fast_accept_summary()}"
+                )
             elif self.stabilizer is not None:
                 print(f"[stabilizer-audit-summary] {self.stabilizer.audit_summary()}")
+                print(f"[fast-accept-summary] {self.stabilizer.fast_accept_summary()}")
             if self.gate is not None:
                 gate_stats = self.gate.stats()
                 payload = dict(gate_stats.__dict__)

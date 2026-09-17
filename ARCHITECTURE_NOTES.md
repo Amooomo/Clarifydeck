@@ -2131,6 +2131,57 @@ Status: LOCAL PASS / DEVICE RELIABILITY MEASUREMENT PENDING
 - no capture/OCR/stabilizer-behavior/transport/overlay/renderer changes; no new
   dependency; no persisted telemetry; no QAM UI.
 
+## Phase 2N.4 — device reliability result
+
+Status: DEVICE MEASUREMENT (one game, one Region, normal dialog)
+
+- 52 accepted text transitions collected during normal Lies of P dialog
+  progression in one Region.
+- `first_matches_final` = 51 / 52 (overall first/final match rate 98.08%).
+- confidence buckets: `0.95-1.00` count 48, matches 48 (100%); `0.90-0.94`
+  count 2, matches 1 (50%); `0.80-0.89` count 2, matches 2 (100%). So `>=0.95`
+  coverage = 48/52 (~92.3%) with 48/48 matches.
+- median first-candidate-to-accept ≈ 998.123 ms; `0.95-1.00` saving sum
+  47566.783 ms.
+- the single mismatch had `first_conf=0.93356`, `candidate_count=3`,
+  `distinct_candidates=2`, `first_to_accept_ms=1966.478`.
+- limitation: this is strong evidence for this game/session, not proof of
+  universal correctness across all games/languages.
+
+## Phase 2N.5A — Conservative High-Confidence Fast Accept
+
+Status: LOCAL PASS / DEVICE RETEST PENDING (not a new stable baseline)
+
+- narrow, reversible fast path for **replacement-only** high-confidence text;
+  the existing consensus path remains the fallback everywhere else.
+- `FAST_ACCEPT_MIN_CONFIDENCE = 0.95` (existing minimum-line-confidence
+  semantics; no new confidence formula). Not exposed in UI.
+- a candidate is fast-accepted only when all hold: non-empty eligible candidate;
+  an existing non-empty Stable Text is published; the exact normalized text
+  differs from it; confidence >= 0.95; it is the first eligible candidate of the
+  current replacement trial; no fast-accept lock is held.
+- initial publication is explicitly excluded: with no Stable Text yet the first
+  OCR result still requires `consensus_required = 2`.
+- fallback unchanged for everything else: `consensus_required = 2`,
+  `history_size = 3`, `min_line_confidence = 0.70`, `stale_timeout_sec = 2.0`;
+  clear/no-text/skipped-frame semantics are unchanged.
+- anti-flapping state (per region): after a fast accept the text is locked; the
+  immediately next eligible candidate is shadow-inspected (diagnostic only). A
+  match releases the lock; a mismatch leaves it locked until the ordinary
+  consensus path accepts a different value. Alternating high-confidence noise
+  therefore does not emit one Stable Text event per frame and never emits more
+  than the unchanged consensus path would.
+- diagnostics (stderr only, no raw OCR text): `[fast-accept]` per fast accept,
+  `[fast-accept-confirm]` per resolved shadow check, `[fast-accept-summary]`
+  (`fast_accept_total`, `fast_accept_next_match`, `fast_accept_next_diff`,
+  `fast_accept_confirm_rate`, `fallback_accept_total`, median realized saving) on
+  shutdown; bounded recent records (16). Mirrored to the plugin journal.
+- the 2N.4 reliability audit is retained; fast-accepted transitions are tagged
+  (`fast_accept` / `fast_accept_transitions`) so the historical consensus=2
+  metric is not misread.
+- no capture/OCR-runtime/renderer/transport-schema/overlay-delivery changes; no
+  new dependency; no persisted telemetry; no QAM UI.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so
