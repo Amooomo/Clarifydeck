@@ -45,6 +45,9 @@ class StableTextEnvelope:
     source_seq: Optional[int]
     timestamp_monotonic: float
     region_id: Optional[str] = None
+    # Phase 2N.3 optional diagnostic: capture-completion monotonic clock for
+    # end-to-end frame-age measurement. Never required; absent on older events.
+    captured_monotonic: Optional[float] = None
 
 
 def validate_region_id(region_id: Any) -> str:
@@ -60,6 +63,7 @@ def envelope_from_event(
     *,
     version: int = PROTOCOL_VERSION,
     region_id: Optional[str] = None,
+    captured_monotonic: Optional[float] = None,
 ) -> StableTextEnvelope:
     """Build an envelope from a stabilizer ``StableTextEvent`` (duck-typed).
 
@@ -92,6 +96,9 @@ def envelope_from_event(
         source_seq=source_seq,
         timestamp_monotonic=float(getattr(event, "timestamp_monotonic", 0.0)),
         region_id=region_id,
+        captured_monotonic=(
+            None if captured_monotonic is None else float(captured_monotonic)
+        ),
     )
 
 
@@ -100,7 +107,11 @@ def encode_region_stable_text_event(event_seq: int, region_event: Any) -> str:
     region_id = validate_region_id(getattr(region_event, "region_id", None))
     event = getattr(region_event, "event", region_event)
     envelope = envelope_from_event(
-        event_seq, event, version=REGION_PROTOCOL_VERSION, region_id=region_id
+        event_seq,
+        event,
+        version=REGION_PROTOCOL_VERSION,
+        region_id=region_id,
+        captured_monotonic=getattr(region_event, "captured_monotonic", None),
     )
     return encode_envelope(envelope)
 
@@ -128,6 +139,8 @@ def encode_envelope(envelope: StableTextEnvelope) -> str:
     }
     if envelope.region_id is not None:
         payload["region_id"] = envelope.region_id
+    if envelope.captured_monotonic is not None:
+        payload["captured_monotonic"] = envelope.captured_monotonic
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -177,6 +190,11 @@ def decode_envelope(line: Any) -> StableTextEnvelope:
     if not _is_number(timestamp) or not math.isfinite(timestamp) or timestamp < 0:
         raise TransportError("invalid_timestamp")
 
+    captured = data.get("captured_monotonic")
+    if captured is not None and (not _is_number(captured) or not math.isfinite(captured) or captured < 0):
+        raise TransportError("invalid_captured_monotonic")
+    captured_value = None if captured is None else float(captured)
+
     if kind == "text":
         text = data.get("text")
         if not isinstance(text, str) or text == "":
@@ -188,7 +206,15 @@ def decode_envelope(line: Any) -> StableTextEnvelope:
         if not _is_int(source_seq) or source_seq < 0:
             raise TransportError("invalid_source_seq")
         return StableTextEnvelope(
-            version, event_seq, "text", text, float(confidence), int(source_seq), float(timestamp), region_id
+            version,
+            event_seq,
+            "text",
+            text,
+            float(confidence),
+            int(source_seq),
+            float(timestamp),
+            region_id,
+            captured_value,
         )
 
     # kind == "clear"
@@ -198,4 +224,6 @@ def decode_envelope(line: Any) -> StableTextEnvelope:
         raise TransportError("invalid_confidence")
     if data.get("source_seq") is not None:
         raise TransportError("invalid_source_seq")
-    return StableTextEnvelope(version, event_seq, "clear", "", None, None, float(timestamp), region_id)
+    return StableTextEnvelope(
+        version, event_seq, "clear", "", None, None, float(timestamp), region_id, captured_value
+    )

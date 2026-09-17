@@ -302,6 +302,26 @@ class OverlayRenderer:
         sys.stderr.write(f"[renderer] {message}\n")
         sys.stderr.flush()
 
+    def log_region_latency(
+        self,
+        region_id: str,
+        source_seq,
+        stable_text_monotonic,
+        captured_monotonic,
+    ) -> None:
+        """Phase 2N.3: log changed-text receive/draw latency (read-only)."""
+        if stable_text_monotonic is None and captured_monotonic is None:
+            return
+        now = time.monotonic()
+        parts = [f"[latency] region={region_id} frame={source_seq}"]
+        if stable_text_monotonic is not None:
+            parts.append("renderer_ms=%.3f" % ((now - float(stable_text_monotonic)) * 1000.0))
+        if captured_monotonic is not None:
+            parts.append(
+                "frame_age_at_render_ms=%.3f" % ((now - float(captured_monotonic)) * 1000.0)
+            )
+        self.log(" ".join(parts))
+
     def open(self) -> None:
         self.dpy = libX11.XOpenDisplay(self.display_name.encode() if self.display_name else None)
         if not self.dpy:
@@ -769,6 +789,12 @@ def serve(renderer: OverlayRenderer, sock_path: Path, parent_pid: int = 0) -> in
                             )
                             renderer.region_text[str(region_id)] = block
                             renderer.draw()
+                            renderer.log_region_latency(
+                                str(region_id),
+                                payload.get("source_seq"),
+                                payload.get("stable_text_monotonic"),
+                                payload.get("captured_monotonic"),
+                            )
                         continue
                     if action == "set_region_style":
                         region_id = str(payload.get("region_id", ""))

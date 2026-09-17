@@ -66,6 +66,8 @@ class AcceptedStableTextEvent:
     timestamp_monotonic: Optional[float]
     region_id: Optional[str] = None
     transport_version: int = 1
+    # Phase 2N.3 optional diagnostic: capture-completion monotonic clock.
+    captured_monotonic: Optional[float] = None
 
 
 class OCRTransportObserver(Protocol):
@@ -178,6 +180,7 @@ class OCRTransportReceiver:
                 timestamp_monotonic=envelope.timestamp_monotonic,
                 region_id=envelope.region_id,
                 transport_version=envelope.version,
+                captured_monotonic=envelope.captured_monotonic,
             )
         )
         return True

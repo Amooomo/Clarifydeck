@@ -290,6 +290,17 @@ class OCRStabilizer:
     def last_consensus(self) -> int:
         return self._last_consensus
 
+    def first_candidate_timestamp(self, text: str) -> Optional[float]:
+        """Earliest history timestamp for ``text`` (diagnostics only, read-only).
+
+        Used to measure how long a new exact string took to reach consensus
+        acceptance; never affects stabilization behavior.
+        """
+        for candidate in self._history:
+            if candidate.text == text:
+                return candidate.timestamp_monotonic
+        return None
+
     @property
     def consensus_required(self) -> int:
         return self._consensus_required

@@ -294,7 +294,16 @@ class MainLoopOverlayDelivery:
         if action.kind == "hide":
             await manager.hide_region_text(action.region_id)
         else:
-            await manager.set_region_text(action.region_id, rect, action.text)
+            # Phase 2N.3 optional diagnostic fields; managers without these
+            # keyword arguments still receive the required positional values.
+            await manager.set_region_text(
+                action.region_id,
+                rect,
+                action.text,
+                source_seq=action.source_seq,
+                stable_text_monotonic=action.timestamp_monotonic,
+                captured_monotonic=action.captured_monotonic,
+            )
         self._stats.actions_delivered += 1
 
 

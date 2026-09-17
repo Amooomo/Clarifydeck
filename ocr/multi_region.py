@@ -16,6 +16,7 @@ Change-gated multi-region scheduling is intentionally deferred.
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Optional
 
@@ -24,6 +25,9 @@ from capture.recognition_regions import RecognitionRegion
 from capture.roi import NormalizedROI, PixelROI, crop_rgba, resolve_roi
 from ocr.stabilizer import OCRStabilizer, StableTextEvent
 
+# Phase 2N.3: bounded, runtime-only latency samples for changed Stable Text.
+MAX_LATENCY_SAMPLES = 8
+
 
 @dataclass(frozen=True)
 class RegionStableTextEvent:
@@ -31,6 +35,7 @@ class RegionStableTextEvent:
 
     region_id: str
     event: StableTextEvent
+    captured_monotonic: Optional[float] = None
 
 
 @dataclass
@@ -82,6 +87,7 @@ class MultiRegionOCRCoordinator:
         self._clock = clock
         self._states: dict[str, RegionRecognitionState] = {}
         self._stats = MultiRegionStats()
+        self._latency: deque = deque(maxlen=MAX_LATENCY_SAMPLES)
 
     # -- introspection -----------------------------------------------------
 
@@ -92,11 +98,19 @@ class MultiRegionOCRCoordinator:
     def state_ids(self) -> tuple[str, ...]:
         return tuple(self._states.keys())
 
+    def drain_latency(self) -> list[dict]:
+        """Return and clear the bounded changed-text latency samples."""
+        samples = list(self._latency)
+        self._latency.clear()
+        return samples
+
     # -- execution ---------------------------------------------------------
 
     def process_frame(self, frame: Any, regions: Iterable[RecognitionRegion]) -> list[RegionStableTextEvent]:
         """Decode once, then OCR each enabled region from the same decoded frame."""
+        decode_started = self._clock()
         decoded = decode_png_ex(frame.encoded_bytes)
+        decode_ms = round((self._clock() - decode_started) * 1000.0, 3)
         return self.process_decoded(
             decoded.rgba,
             decoded.width,
@@ -104,6 +118,7 @@ class MultiRegionOCRCoordinator:
             frame.sequence,
             regions,
             captured_monotonic=getattr(frame, "captured_monotonic", None),
+            decode_ms=decode_ms,
         )
 
     def process_decoded(
@@ -114,6 +129,7 @@ class MultiRegionOCRCoordinator:
         sequence: Optional[int],
         regions: Iterable[RecognitionRegion],
         captured_monotonic: Optional[float] = None,
+        decode_ms: Optional[float] = None,
     ) -> list[RegionStableTextEvent]:
         enabled = [region for region in regions if region.enabled]
         self._discard_missing(enabled)
@@ -124,7 +140,9 @@ class MultiRegionOCRCoordinator:
         for region in enabled:
             state = self._ensure_state(region)
             pixel = region_pixel_rect(region, frame_width, frame_height)
+            crop_started = self._clock()
             crop_width, crop_height, crop = crop_rgba(rgba, frame_width, frame_height, pixel)
+            crop_ended = self._clock()
             self._stats.crops += 1
 
             if state.gate is not None:
@@ -142,7 +160,13 @@ class MultiRegionOCRCoordinator:
                     # and forward any tick-produced clear (never discard it).
                     self._stats.regions_skipped += 1
                     for event in state.stabilizer.tick(self._clock()):
-                        events.append(RegionStableTextEvent(region_id=region.region_id, event=event))
+                        events.append(
+                            RegionStableTextEvent(
+                                region_id=region.region_id,
+                                event=event,
+                                captured_monotonic=captured_monotonic,
+                            )
+                        )
                         self._stats.events_emitted += 1
                     continue
                 if decision.reason == "forced_refresh":
@@ -150,12 +174,75 @@ class MultiRegionOCRCoordinator:
                 elif decision.reason == "detector_error":
                     self._stats.detector_errors += 1
 
+            ocr_started = self._clock()
             result = self._runtime.recognize_rgba(crop, crop_width, crop_height, sequence=sequence)
+            ocr_ended = self._clock()
             self._stats.ocr_calls += 1
-            for event in state.stabilizer.observe(result.lines, result.sequence, self._clock()):
-                events.append(RegionStableTextEvent(region_id=region.region_id, event=event))
+            for event in state.stabilizer.observe(result.lines, result.sequence, ocr_ended):
+                events.append(
+                    RegionStableTextEvent(
+                        region_id=region.region_id,
+                        event=event,
+                        captured_monotonic=captured_monotonic,
+                    )
+                )
                 self._stats.events_emitted += 1
+                if event.kind == "text":
+                    self._record_latency(
+                        region.region_id,
+                        sequence,
+                        captured_monotonic,
+                        decode_ms,
+                        (crop_ended - crop_started) * 1000.0,
+                        result,
+                        event,
+                        state.stabilizer,
+                        ocr_started,
+                        ocr_ended,
+                    )
         return events
+
+    def _record_latency(
+        self,
+        region_id: str,
+        sequence: Optional[int],
+        captured_monotonic: Optional[float],
+        decode_ms: Optional[float],
+        roi_ms: float,
+        result: Any,
+        event: StableTextEvent,
+        stabilizer: OCRStabilizer,
+        ocr_started: float,
+        ocr_ended: float,
+    ) -> None:
+        ocr_ms = getattr(result, "elapsed_ms", None)
+        if ocr_ms is None:
+            ocr_ms = (ocr_ended - ocr_started) * 1000.0
+        first_candidate = stabilizer.first_candidate_timestamp(event.text)
+        sample = {
+            "region_id": region_id,
+            "frame_seq": sequence,
+            "captured_monotonic": captured_monotonic,
+            "capture_age_at_ocr_start_ms": (
+                round((ocr_started - captured_monotonic) * 1000.0, 3)
+                if captured_monotonic is not None
+                else None
+            ),
+            "decode_ms": decode_ms,
+            "roi_ms": round(roi_ms, 3),
+            "ocr_ms": round(float(ocr_ms), 3),
+            "stabilizer_accept_ms": (
+                round((event.timestamp_monotonic - first_candidate) * 1000.0, 3)
+                if first_candidate is not None
+                else None
+            ),
+            "worker_total_ms": (
+                round((event.timestamp_monotonic - captured_monotonic) * 1000.0, 3)
+                if captured_monotonic is not None
+                else None
+            ),
+        }
+        self._latency.append(sample)
 
     def reset(self) -> None:
         self._states.clear()

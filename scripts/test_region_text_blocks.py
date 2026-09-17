@@ -63,7 +63,7 @@ class RegionFakeManager:
     async def hide(self):
         self.hides += 1
 
-    async def set_region_text(self, region_id, rect, text):
+    async def set_region_text(self, region_id, rect, text, **kwargs):
         self.region_texts[region_id] = text
 
     async def hide_region_text(self, region_id):

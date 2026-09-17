@@ -35,6 +35,8 @@ class OverlayTextAction:
     source_seq: Optional[int] = None
     timestamp_monotonic: Optional[float] = None
     region_id: Optional[str] = None  # v2 region identity; None for legacy v1
+    # Phase 2N.3 optional diagnostic: capture-completion monotonic clock.
+    captured_monotonic: Optional[float] = None
 
 
 @dataclass
@@ -155,6 +157,7 @@ class OverlayTextCoordinator:
             source_seq=event.source_seq,
             timestamp_monotonic=event.timestamp_monotonic,
             region_id=getattr(event, "region_id", None),
+            captured_monotonic=getattr(event, "captured_monotonic", None),
         )
         self._latest = action
         return action

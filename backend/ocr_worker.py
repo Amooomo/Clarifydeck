@@ -408,6 +408,10 @@ class OCRWorkerManager:
                 line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
                 if line:
                     self._stderr_tail.append(line)
+                    # Phase 2N.3: mirror changed-text latency lines to the plugin
+                    # journal so device traces are collectible (one per change).
+                    if "[latency]" in line:
+                        self._log(line)
         except Exception:
             pass
         finally:

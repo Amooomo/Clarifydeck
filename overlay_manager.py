@@ -365,7 +365,16 @@ class OverlayManager:
 
     # -- per-region persistent text blocks (Phase 2M.1) --------------------
 
-    async def set_region_text(self, region_id: str, rect: tuple, text: str) -> dict:
+    async def set_region_text(
+        self,
+        region_id: str,
+        rect: tuple,
+        text: str,
+        *,
+        source_seq: Optional[int] = None,
+        stable_text_monotonic: Optional[float] = None,
+        captured_monotonic: Optional[float] = None,
+    ) -> dict:
         async with self._lock:
             key = str(region_id)
             style = self._region_style.get(key, protocol.DEFAULT_STYLE)
@@ -378,16 +387,27 @@ class OverlayManager:
             }
             if self._text_enabled and self._state == OverlayState.RUNNING:
                 x, y, w, h = rect
-                self._send(
-                    {
-                        "type": "set_region_text",
-                        "region_id": key,
-                        "rect": {"x": x, "y": y, "w": w, "h": h},
-                        "text": text,
-                        "style": style,
-                        "font_size": font_size,
-                    }
-                )
+                payload = {
+                    "type": "set_region_text",
+                    "region_id": key,
+                    "rect": {"x": x, "y": y, "w": w, "h": h},
+                    "text": text,
+                    "style": style,
+                    "font_size": font_size,
+                }
+                # Phase 2N.3 optional diagnostic fields (renderer logs only).
+                if source_seq is not None:
+                    payload["source_seq"] = int(source_seq)
+                if stable_text_monotonic is not None:
+                    payload["stable_text_monotonic"] = float(stable_text_monotonic)
+                if captured_monotonic is not None:
+                    payload["captured_monotonic"] = float(captured_monotonic)
+                self._send(payload)
+                if stable_text_monotonic is not None:
+                    _log(
+                        "[latency] region=%s frame=%s stable_text_to_send_ms=%.3f"
+                        % (key, source_seq, (time.monotonic() - float(stable_text_monotonic)) * 1000.0)
+                    )
             return self.status()
 
     async def get_region_panel_style(self, region_id: str) -> dict:

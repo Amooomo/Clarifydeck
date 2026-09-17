@@ -2053,6 +2053,43 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
   no renderer/`overlay/renderer.py` change; no `ShapeInput`/touch/scroll work; no
   presentation-persistence change; Preview independence preserved.
 
+## Phase 2N.2 — Steam Performance HUD coexistence
+
+Status: ACCEPTED LIMITATION (product decision)
+
+- device A/B: the Steam Deck built-in Performance/FPS HUD cannot coexist with
+  ClarifyDeck's external X11 overlay; the HUD fails as soon as the renderer exists
+  and returns immediately when the renderer exits. Removing
+  `GAMESCOPE_EXTERNAL_OVERLAY` restores the HUD but makes the ClarifyDeck overlay
+  disappear from the game. This is accepted for now; no further Gamescope
+  coexistence work is planned.
+- touch scrolling remains deferred/abandoned for the current roadmap; the touch
+  research commits are not part of the production baseline.
+
+## Phase 2N.3 — End-to-End OCR Text-Update Latency Audit
+
+Status: LOCAL PASS / DEVICE LATENCY MEASUREMENT PENDING
+
+- optional, runtime-only latency instrumentation for changed Stable Text; no
+  behavioral tuning (capture FPS, OCR FPS, change gate, model, detector limits,
+  threads, stabilizer thresholds, renderer behavior all frozen).
+- worker: `MultiRegionOCRCoordinator` times decode, per-region crop, OCR and
+  stabilizer acceptance, records a bounded (8) sample on each changed text, and
+  `scripts/ocr_test.py` prints one `[latency]` line per change to stderr
+  (`capture_age_at_ocr_start_ms`, `decode_ms`, `roi_ms`, `ocr_ms`,
+  `stabilizer_accept_ms`, `worker_total_ms`); no text content is logged.
+- stabilizer: new read-only `first_candidate_timestamp(text)` (no behavior change).
+- transport: optional `captured_monotonic` field on the v2 event (absent on older
+  events; validated when present) carried through `AcceptedStableTextEvent` ->
+  `OverlayTextAction` -> `set_region_text` payload. Not a required-schema change.
+- manager: `set_region_text` accepts optional `source_seq` /
+  `stable_text_monotonic` / `captured_monotonic`, includes them in the renderer
+  payload, and logs `[latency] region=… frame=… stable_text_to_send_ms=…`.
+- renderer: logs `[latency] region=… frame=… renderer_ms=… frame_age_at_render_ms=…`
+  after drawing a changed text block (read-only, no rendering change).
+- no new dependency, no persisted data, no new RPC/QAM UI; instrumentation is
+  bounded and only fires on changed text.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

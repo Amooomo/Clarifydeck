@@ -406,6 +406,24 @@ class OCRDiagnostic:
                 self._write_machine_line(
                     encode_envelope(envelope_from_event(self._stable_event_seq, region_event.event))
                 )
+        # Phase 2N.3: one concise latency line per changed Stable Text (stderr only,
+        # never the machine JSONL stream). No text content is logged.
+        for sample in self._multi_region_coordinator.drain_latency():
+            print(
+                "[latency] region={region} frame={frame} "
+                "capture_age_at_ocr_start_ms={age} decode_ms={decode} roi_ms={roi} "
+                "ocr_ms={ocr} stabilizer_accept_ms={stab} worker_total_ms={total}".format(
+                    region=sample.get("region_id"),
+                    frame=sample.get("frame_seq"),
+                    age=sample.get("capture_age_at_ocr_start_ms"),
+                    decode=sample.get("decode_ms"),
+                    roi=sample.get("roi_ms"),
+                    ocr=sample.get("ocr_ms"),
+                    stab=sample.get("stabilizer_accept_ms"),
+                    total=sample.get("worker_total_ms"),
+                ),
+                flush=True,
+            )
 
     def _correlate(self, result, timings: dict) -> None:
         """Bounded recent table: sequence / ocr_wall_ms / det_ms / capture timing."""

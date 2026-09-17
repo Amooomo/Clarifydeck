@@ -109,7 +109,7 @@ class FakeManager:
     async def clear_all_region_text(self):
         pass
 
-    async def set_region_text(self, region_id, rect, text):
+    async def set_region_text(self, region_id, rect, text, **kwargs):
         pass
 
     async def hide_region_text(self, region_id):
