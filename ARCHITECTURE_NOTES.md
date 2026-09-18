@@ -2343,6 +2343,41 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
 - historical notes above are preserved; the screenshot path is not rewritten out
   of the record.
 
+## Phase 2O.1 — Safe slimming + production packaging audit
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+- audit baseline (frozen Phase 2N.7): working tree ≈ 793 MiB, of which
+  `runtime/ocr/site-packages` ≈ 396 MiB, `node_modules` ≈ 139 MiB,
+  `.pnpm-store` ≈ 139 MiB, `.git` ≈ 50 MiB, `models` ≈ 30 MiB, `share` ≈ 22 MiB,
+  `lib` ≈ 12 MiB; Git tracks 152 files / ≈ 66 MiB (models, tessdata and the
+  bundled native libs are tracked).
+- production boundary: the repository stays developer-complete; the shipped
+  plugin is defined by an explicit allowlist in `scripts/package_plugin.py`
+  (`main.py`, `overlay_manager.py`, `backend_leader.py`, `plugin.json`,
+  `package.json`, `LICENSE`, `README.md`, `backend/`, `capture/`, `ocr/`,
+  `overlay/`, `scripts/ocr_worker.py` + `scripts/ocr_test.py`, `runtime/`,
+  `models/`, `lib/`, `share/`, `bin/`, `defaults/`, `py_modules/`, `dist/`).
+- excluded from the artifact: `.git`, `node_modules`, `.pnpm-store`, `.conda*`,
+  `__pycache__`/`*.pyc`, `.pytest_cache`/`.mypy_cache`/`.ruff_cache`, `src/`,
+  frontend build tooling (`tsconfig.json`, `rollup.config.js`, `pnpm-lock.yaml`,
+  `.npmrc`, `environment.yml`), `scripts/test_*.py` and other dev scripts,
+  `backend/Dockerfile`/`Makefile`/`entrypoint.sh`/`src/`, docs
+  (`ARCHITECTURE_NOTES.md`, `project_plan.md`, `PHASE_1C2_AUDIT.md`,
+  `RECOVERY.md`, `DEVELOPMENT_REQUIREMENTS.md`), `assets/`, `decky.pyi`, and
+  `dist/*.map` source maps.
+- measured effect: allowlisted artifact = 2247 files / ≈ 437 MiB vs ≈ 793 MiB
+  working tree (≈ 356 MiB excluded, dominated by dev deps and caches). The
+  bundled OCR runtime, models and native libs remain the bulk and are retained.
+- deferred (HIGH-RISK, audit-only): duplicate `rapidocr/models/*.onnx` vs
+  `models/ppocrv6/*.onnx` (≈ 31 MiB), unused-looking OpenCV Qt/video codec libs
+  (≈ 60 MiB), `onnxruntime/transformers` examples, Tesseract `bin/`/`lib/`/
+  `share/tessdata` (≈ 35 MiB) — none removed without device evidence.
+- build/verify: `python3 scripts/package_plugin.py --source . --out out
+  [--dry-run|--zip]`; `scripts/test_packaging.py` asserts the boundary on a
+  synthetic tree. No runtime behavior, capture, OCR, stabilizer, Fast Accept,
+  renderer or UI change.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so
