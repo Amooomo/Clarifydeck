@@ -13,6 +13,7 @@ Run:
 from __future__ import annotations
 
 import builtins
+import os
 import sys
 import types
 import unittest
@@ -609,7 +610,129 @@ class MultiRegionOneFrameTest(unittest.TestCase):
         self.assertEqual(coordinator.stats.crops, 2)
 
 
-class WorkerCommandForwardingTest(unittest.TestCase):
+class RuntimeEnvTest(unittest.TestCase):
+    @staticmethod
+    def _fs(existing, dirs, owners=None):
+        owners = owners or {}
+        return (
+            lambda path: path in existing,
+            lambda path: path in dirs,
+            lambda path: owners.get(path),
+        )
+
+    def test_existing_valid_runtime_dir_preserved(self) -> None:
+        env = {"XDG_RUNTIME_DIR": "/custom/rt"}
+        exists, is_dir, owner = self._fs({"/custom/rt"}, {"/custom/rt"}, {"/custom/rt": 1000})
+        result = pw.ensure_xdg_runtime_dir(
+            env, geteuid=lambda: 1000, path_exists=exists, path_is_dir=is_dir, path_owner_uid=owner
+        )
+        self.assertEqual(result["status"], "existing")
+        self.assertEqual(env["XDG_RUNTIME_DIR"], "/custom/rt")
+
+    def test_missing_runtime_dir_is_derived_from_euid(self) -> None:
+        env: dict = {}
+        exists, is_dir, owner = self._fs({"/run/user/1234"}, {"/run/user/1234"}, {"/run/user/1234": 1234})
+        logs: list = []
+        result = pw.ensure_xdg_runtime_dir(
+            env,
+            geteuid=lambda: 1234,
+            path_exists=exists,
+            path_is_dir=is_dir,
+            path_owner_uid=owner,
+            logger=logs.append,
+        )
+        self.assertEqual(result["status"], "derived")
+        self.assertEqual(env["XDG_RUNTIME_DIR"], "/run/user/1234")
+        self.assertTrue(any("source=derived" in line and "uid=1234" in line for line in logs))
+
+    def test_derived_directory_missing_is_clean_error(self) -> None:
+        env: dict = {}
+        exists, is_dir, owner = self._fs(set(), set())
+        with self.assertRaises(CaptureError) as ctx:
+            pw.ensure_xdg_runtime_dir(
+                env, geteuid=lambda: 1234, path_exists=exists, path_is_dir=is_dir, path_owner_uid=owner
+            )
+        self.assertEqual(ctx.exception.code, "pipewire_runtime_env_unavailable")
+        self.assertNotIn("XDG_RUNTIME_DIR", env)
+
+    def test_owner_mismatch_is_clean_error(self) -> None:
+        env: dict = {}
+        exists, is_dir, owner = self._fs({"/run/user/1234"}, {"/run/user/1234"}, {"/run/user/1234": 0})
+        with self.assertRaises(CaptureError) as ctx:
+            pw.ensure_xdg_runtime_dir(
+                env, geteuid=lambda: 1234, path_exists=exists, path_is_dir=is_dir, path_owner_uid=owner
+            )
+        self.assertEqual(ctx.exception.code, "pipewire_runtime_env_unavailable")
+
+    def test_invalid_existing_is_repaired(self) -> None:
+        env = {"XDG_RUNTIME_DIR": "/stale/rt"}
+        exists, is_dir, owner = self._fs({"/run/user/1234"}, {"/run/user/1234"}, {"/run/user/1234": 1234})
+        result = pw.ensure_xdg_runtime_dir(
+            env, geteuid=lambda: 1234, path_exists=exists, path_is_dir=is_dir, path_owner_uid=owner
+        )
+        self.assertEqual(result["status"], "repaired")
+        self.assertEqual(env["XDG_RUNTIME_DIR"], "/run/user/1234")
+
+    def test_non_posix_host_is_unknown(self) -> None:
+        result = pw.ensure_xdg_runtime_dir({}, geteuid=lambda: None)
+        self.assertEqual(result["status"], "unknown")
+
+    def test_no_hard_coded_uid_or_username(self) -> None:
+        source = (ROOT / "capture" / "pipewire_capture.py").read_text(encoding="utf-8")
+        self.assertNotIn("/run/user/1000", source)
+        self.assertNotIn("/home/deck", source)
+        self.assertNotIn('"deck"', source)
+        self.assertNotIn("'deck'", source)
+        self.assertIn("geteuid", source)
+
+    def test_screenshot_backend_does_not_touch_runtime_dir(self) -> None:
+        env_before = dict(os.environ)
+        backend = ScreenshotCaptureBackend(capture=SimpleNamespace(capture_frame=lambda *a, **k: None))
+        backend.start()
+        backend.stop()
+        self.assertEqual(dict(os.environ), env_before)
+
+    def test_backend_applies_runtime_env_only_when_owning_adapter(self) -> None:
+        calls: list = []
+
+        def runtime_env(**kwargs):
+            calls.append(kwargs)
+            return {"status": "derived", "path": "/run/user/1234", "uid": 1234}
+
+        backend = PipeWireCaptureBackend(
+            adapter_factory=lambda **kwargs: FakeAdapter(),
+            runtime_env=runtime_env,
+            retry_interval=0.0,
+        )
+        backend.start()
+        self.assertEqual(len(calls), 1)
+        self.assertIn("env", calls[0])
+        self.assertIn("logger", calls[0])
+
+    def test_injected_adapter_skips_runtime_env(self) -> None:
+        calls: list = []
+        backend = PipeWireCaptureBackend(
+            adapter=FakeAdapter(),
+            runtime_env=lambda **kwargs: calls.append(kwargs),
+            retry_interval=0.0,
+        )
+        backend.start()
+        self.assertEqual(calls, [])
+
+    def test_runtime_env_failure_propagates(self) -> None:
+        def runtime_env(**_kwargs):
+            raise CaptureError("pipewire_runtime_env_unavailable", "missing")
+
+        backend = PipeWireCaptureBackend(
+            adapter_factory=lambda **kwargs: FakeAdapter(),
+            runtime_env=runtime_env,
+        )
+        with self.assertRaises(CaptureError) as ctx:
+            backend.start()
+        self.assertEqual(ctx.exception.code, "pipewire_runtime_env_unavailable")
+
+
+
     def test_capture_backend_flag_forwarded(self) -> None:
         from backend.ocr_worker import OCRWorkerManager
 

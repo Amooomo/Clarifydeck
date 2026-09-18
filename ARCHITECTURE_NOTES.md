@@ -2271,6 +2271,31 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
   journal.
 - no architecture/OCR/Fast-Accept/renderer/UI/default-backend changes.
 
+## Phase 2N.6.2 — PipeWire worker XDG runtime hotfix
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+- confirmed device root cause: the Decky `plugin_loader.service` runs as root
+  and does not export `XDG_RUNTIME_DIR`; the OCR worker is correctly dropped to
+  the unprivileged user, but the inherited environment has no runtime dir, so the
+  PipeWire client could not resolve `/run/user/<euid>` and failed with
+  `bus_error:Failed to connect` on every retry.
+- `capture/pipewire_capture.py::ensure_xdg_runtime_dir` derives the expected
+  runtime dir from `os.geteuid()` (never hard-coded), validates it (exists, is a
+  directory, and owner uid matches when POSIX ownership is available) and injects
+  it into the process environment before GStreamer/PipeWire initialize. A valid
+  existing `XDG_RUNTIME_DIR` is preserved; an unusable one is repaired from the
+  derived path; if no usable directory exists it raises
+  `CaptureError("pipewire_runtime_env_unavailable")` (the directory is never
+  created).
+- `PipeWireCaptureBackend.start()` applies this only when it owns the real
+  adapter (the loader/service environment); injected test adapters and the
+  screenshot backend are untouched. Logs
+  `[capture-pipewire] runtime XDG_RUNTIME_DIR=… source=derived uid=…` when the
+  fallback is applied. No other environment variable is set.
+- no architecture/OCR/Fast-Accept/renderer/UI/default-backend changes; no
+  systemd `XDG_RUNTIME_DIR` override is required.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

@@ -31,6 +31,7 @@ from .pipewire_capture import (
     PIPEWIRE_TARGET_DEFAULT,
     PipeWireFrame,
     create_gst_adapter,
+    ensure_xdg_runtime_dir,
 )
 
 CAPTURE_BACKEND_ENV = "CLARIFYDECK_CAPTURE_BACKEND"
@@ -106,6 +107,9 @@ class PipeWireCaptureBackend:
         self,
         *,
         adapter=None,
+        adapter_factory: Optional[Callable[..., object]] = None,
+        runtime_env: Optional[Callable[..., dict]] = None,
+        env=None,
         logger: Optional[Callable[[str], None]] = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
@@ -116,6 +120,10 @@ class PipeWireCaptureBackend:
         retry_interval: float = DEFAULT_RETRY_INTERVAL_SEC,
     ) -> None:
         self._adapter = adapter
+        self._adapter_factory = adapter_factory or create_gst_adapter
+        self._runtime_env = runtime_env or ensure_xdg_runtime_dir
+        self._env = env
+        self._owns_adapter = adapter is None
         self._log = logger or (lambda message: None)
         self._clock = clock
         self._sleep = sleep
@@ -134,7 +142,7 @@ class PipeWireCaptureBackend:
 
     def _ensure_adapter(self):
         if self._adapter is None:
-            self._adapter = create_gst_adapter(
+            self._adapter = self._adapter_factory(
                 target=self._target,
                 logger=self._log,
                 clock=self._clock,
@@ -146,6 +154,12 @@ class PipeWireCaptureBackend:
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> dict:
+        # Phase 2N.6.2: the Decky loader runs as root without XDG_RUNTIME_DIR;
+        # this unprivileged worker must resolve its own runtime dir before
+        # GStreamer/PipeWire initialize. Only applies when we own the real
+        # adapter (injected test adapters are host-independent).
+        if self._owns_adapter:
+            self._runtime_env(env=self._env, logger=self._log)
         adapter = self._ensure_adapter()
         self._stop_requested = False
         deadline = self._clock() + max(0.0, self._retry_window)

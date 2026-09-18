@@ -16,6 +16,7 @@ Design constraints (see ARCHITECTURE_NOTES Phase 2N.6):
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -30,6 +31,8 @@ DEFAULT_KEEPALIVE_MS = 33
 DEFAULT_RETRY_WINDOW_SEC = 5.0
 DEFAULT_RETRY_INTERVAL_SEC = 0.5
 DEFAULT_FIRST_SAMPLE_TIMEOUT_SEC = 2.0
+
+RUNTIME_DIR_TEMPLATE = "/run/user/{uid}"
 
 
 @dataclass(frozen=True)
@@ -68,6 +71,96 @@ def load_gst():
         return Gst, GstVideo, GstApp
     except Exception as exc:  # missing gi / typelib / Gst
         raise CaptureError("pipewire_unavailable", f"{type(exc).__name__}: {exc}") from exc
+
+
+def _default_owner_uid(path: str) -> Optional[int]:
+    """Owner uid of ``path`` when the host exposes POSIX ownership, else None."""
+    if not hasattr(os, "geteuid"):
+        return None
+    try:
+        return int(os.stat(path).st_uid)
+    except OSError:
+        return None
+
+
+def _runtime_dir_status(
+    path: str,
+    euid: int,
+    path_exists: Callable[[str], bool],
+    path_is_dir: Callable[[str], bool],
+    path_owner_uid: Callable[[str], Optional[int]],
+) -> Optional[str]:
+    """Return None when ``path`` is usable for ``euid``, else a short reason."""
+    if not path or not path_exists(path):
+        return "missing"
+    if not path_is_dir(path):
+        return "not_directory"
+    owner = path_owner_uid(path)
+    if owner is not None and owner != euid:
+        return f"owner_mismatch:{owner}"
+    return None
+
+
+def ensure_xdg_runtime_dir(
+    env=None,
+    *,
+    geteuid: Optional[Callable[[], int]] = None,
+    path_exists: Optional[Callable[[str], bool]] = None,
+    path_is_dir: Optional[Callable[[str], bool]] = None,
+    path_owner_uid: Optional[Callable[[str], Optional[int]]] = None,
+    logger: Optional[Callable[[str], None]] = None,
+) -> dict:
+    """Ensure ``XDG_RUNTIME_DIR`` resolves to the effective UID's runtime dir.
+
+    The Decky ``plugin_loader.service`` runs as root and does not export
+    ``XDG_RUNTIME_DIR``; the OCR worker is dropped to the deck user, so the
+    PipeWire client cannot find ``/run/user/<euid>``. This derives the expected
+    path from the *effective* uid (never hard-coded), validates it, and injects
+    it into the process environment before GStreamer/PipeWire initialize.
+
+    Returns ``{"status", "path", "uid"}``. Raises
+    ``CaptureError("pipewire_runtime_env_unavailable")`` when no usable runtime
+    directory can be found; the directory is never created here.
+    """
+    environment = os.environ if env is None else env
+    log = logger or (lambda message: None)
+    resolve_euid = geteuid if geteuid is not None else getattr(os, "geteuid", None)
+    if resolve_euid is None:
+        # Non-POSIX host (e.g. Windows development): not applicable.
+        return {"status": "unknown", "path": None, "uid": None}
+    euid_value = resolve_euid()
+    if euid_value is None:
+        return {"status": "unknown", "path": None, "uid": None}
+    euid = int(euid_value)
+    expected = RUNTIME_DIR_TEMPLATE.format(uid=euid)
+
+    exists = path_exists or os.path.exists
+    is_dir = path_is_dir or os.path.isdir
+    owner_uid = path_owner_uid or _default_owner_uid
+
+    current = environment.get("XDG_RUNTIME_DIR")
+    if current:
+        current_reason = _runtime_dir_status(current, euid, exists, is_dir, owner_uid)
+        if current_reason is None:
+            return {"status": "existing", "path": current, "uid": euid}
+    else:
+        current_reason = "unset"
+
+    expected_reason = _runtime_dir_status(expected, euid, exists, is_dir, owner_uid)
+    if expected_reason is None:
+        environment["XDG_RUNTIME_DIR"] = expected
+        status = "repaired" if current else "derived"
+        log(
+            f"[capture-pipewire] runtime XDG_RUNTIME_DIR={expected} "
+            f"source={status} uid={euid}"
+        )
+        return {"status": status, "path": expected, "uid": euid}
+
+    reason = f"expected:{expected_reason}"
+    if current:
+        reason = f"current:{current_reason} {reason}"
+    log(f"[capture-pipewire] runtime env unavailable path={expected} uid={euid} reason={reason}")
+    raise CaptureError("pipewire_runtime_env_unavailable", f"path={expected} uid={euid} reason={reason}")
 
 
 def _clamp(value: int) -> int:
