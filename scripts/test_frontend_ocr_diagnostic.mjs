@@ -19,6 +19,7 @@ const OVERLAY_COMPONENT = path.join(ROOT, "src", "components", "PersistentOverla
 const INDEX = path.join(ROOT, "src", "index.tsx");
 const REGION_LOGIC = path.join(ROOT, "src", "regionEditor.ts");
 const REGION_COMPONENT = path.join(ROOT, "src", "components", "RegionEditor.tsx");
+const QAM_PAGES = path.join(ROOT, "src", "qamPages.ts");
 
 async function loadTs(file, tag) {
   const source = fs.readFileSync(file, "utf8");
@@ -36,6 +37,7 @@ async function loadTs(file, tag) {
 
 const logic = await loadTs(LOGIC, "ocrcontrol");
 const regionLogic = await loadTs(REGION_LOGIC, "region");
+const qamPages = await loadTs(QAM_PAGES, "qampages");
 const componentSrc = fs.readFileSync(COMPONENT, "utf8");
 const overlayComponentSrc = fs.readFileSync(OVERLAY_COMPONENT, "utf8");
 const regionComponentSrc = fs.readFileSync(REGION_COMPONENT, "utf8");
@@ -202,20 +204,27 @@ check("overlay: does not touch OCR lifecycle", () => {
   }
 });
 
-// -- two-page QAM navigation --------------------------------------------------
+// -- ClarifyDeck-owned N-page navigation --------------------------------------
 
-check("index: two pages via native Tabs", () => {
-  assert.ok(indexSrc.includes("Tabs"));
-  assert.ok(indexSrc.includes("activeTab={page}"));
-  assert.ok(indexSrc.includes("onShowTab"));
+check("index: page state owned by ClarifyDeck (no Decky Tabs)", () => {
+  assert.ok(indexSrc.includes("const PAGES: QamPage[]"));
+  assert.ok(indexSrc.includes('{ id: "ocr", title: "OCR" }'));
+  assert.ok(indexSrc.includes('{ id: "regions", title: "Regions" }'));
+  assert.ok(indexSrc.includes("const [activeId, setActiveId] = useState<string>(PAGE_OCR)"));
+  assert.equal(indexSrc.includes("from \"@decky/ui\""), true);
+  assert.equal(/\bTabs\b/.test(indexSrc.replace(/\/\/.*$/gm, "")), false);
 });
-check("index: opens on Page 1 (OCR)", () => {
-  assert.ok(indexSrc.includes('const PAGE_OCR = "ocr"'));
-  assert.ok(indexSrc.includes("useState<string>(PAGE_OCR)"));
+check("index: single page-switch state for click and shoulder", () => {
+  assert.ok(indexSrc.includes("const goToPage = useCallback"));
+  assert.ok(indexSrc.includes("const goPreviousPage = useCallback"));
+  assert.ok(indexSrc.includes("const goNextPage = useCallback"));
+  assert.ok(indexSrc.includes("onSelect={goToPage}"));
+  assert.equal((indexSrc.match(/setActiveId\(/g) || []).length >= 1, true);
 });
-check("index: has a compact fallback page header", () => {
-  assert.ok(indexSrc.includes("FallbackPages"));
-  assert.ok(indexSrc.includes("pageTabStyle"));
+check("index: compact page header controls", () => {
+  assert.ok(indexSrc.includes("function PageHeader("));
+  assert.ok(indexSrc.includes("pageTabStyle(page.id === activeId)"));
+  assert.ok(indexSrc.includes("onClick={() => onSelect(page.id)}"));
 });
 check("index: renders the production page sections", () => {
   assert.ok(indexSrc.includes("<OCRControlSection />"));
@@ -237,43 +246,77 @@ check("index: authoritative v2 region preview retained", () => {
   assert.ok(indexSrc.includes("qamVisible"));
 });
 
-// -- FreeDeck-style Tabs focus ownership --------------------------------------
+// -- Scoped shoulder navigation ------------------------------------------------
 
-check("tabs focus: gamepad tab class map resolved", () => {
-  assert.ok(indexSrc.includes("gamepadTabbedPageClasses"));
-  assert.ok(indexSrc.includes("getGamepadTabClassMap"));
-  assert.ok(indexSrc.includes("interface GamepadTabClassMap"));
+check("shoulder: scoped Focusable handler", () => {
+  assert.ok(indexSrc.includes("Focusable"));
+  assert.ok(indexSrc.includes("onButtonDown={onButtonDown}"));
+  assert.ok(indexSrc.includes("flow-children=\"vertical\""));
+  assert.ok(indexSrc.includes("typeof Focusable === \"function\""));
 });
-check("tabs focus: autoFocusContents disabled", () => {
-  assert.ok(indexSrc.includes("autoFocusContents={false}"));
+check("shoulder: L1/R1 map to previous/next page", () => {
+  assert.ok(indexSrc.includes("GamepadButton.BUMPER_LEFT"));
+  assert.ok(indexSrc.includes("GamepadButton.BUMPER_RIGHT"));
+  assert.ok(indexSrc.includes("goPreviousPage()"));
+  assert.ok(indexSrc.includes("goNextPage()"));
 });
-check("tabs focus: scoped root ref", () => {
-  assert.ok(indexSrc.includes("const rootRef = useRef<HTMLDivElement | null>(null)"));
-  assert.ok(indexSrc.includes('className="clarifydeck-qam-root"'));
-  assert.ok(indexSrc.includes("TAB_STABILITY_CSS"));
+check("shoulder: handler stops propagation", () => {
+  assert.ok(indexSrc.includes("evt.stopPropagation()"));
 });
-check("tabs focus: scoped focus helper", () => {
-  assert.ok(indexSrc.includes("focusTabRow"));
-  assert.ok(indexSrc.includes("root.querySelectorAll"));
-  assert.ok(indexSrc.includes("target?.focus?.()"));
-});
-check("tabs focus: onShowTab refocuses after switch", () => {
-  assert.ok(indexSrc.includes("const onShowTab = useCallback"));
-  assert.ok(indexSrc.includes("focusTabRow();"));
-  assert.ok(indexSrc.includes("setPage(tabId);"));
-  assert.ok(indexSrc.includes("requestAnimationFrame(() => focusTabRow(tabId))"));
-});
-check("tabs focus: no global controller/key listeners", () => {
+check("shoulder: no global controller/key listeners", () => {
   for (const needle of [
     "window.addEventListener",
     "document.addEventListener",
     "keydown",
     "SteamClient.Input",
-    "GamepadEvent",
+    "RegisterForControllerInputMessages",
     "navigator.getGamepads",
   ]) {
     assert.equal(indexSrc.includes(needle), false, `index contains ${needle}`);
   }
+});
+
+// -- N-page pure navigation logic ----------------------------------------------
+
+const P = (id, title) => ({ id, title });
+
+check("pages: previous at first page clamps", () => {
+  assert.equal(qamPages.getPreviousPageIndex(0, 2), 0);
+  assert.equal(qamPages.getPreviousPageIndex(0, 4), 0);
+});
+check("pages: next at last page clamps", () => {
+  assert.equal(qamPages.getNextPageIndex(1, 2), 1);
+  assert.equal(qamPages.getNextPageIndex(3, 4), 3);
+});
+check("pages: two-page previous/next", () => {
+  assert.equal(qamPages.getPreviousPageIndex(1, 2), 0);
+  assert.equal(qamPages.getNextPageIndex(0, 2), 1);
+});
+check("pages: future four-page simulation, no wraparound", () => {
+  const pages = [P("ocr", "OCR"), P("regions", "Regions"), P("translate", "Translate"), P("display", "Display")];
+  assert.equal(qamPages.pageIndexById(pages, "translate"), 2);
+  assert.equal(qamPages.getNextPageIndex(2, pages.length), 3);
+  assert.equal(qamPages.getPreviousPageIndex(2, pages.length), 1);
+  assert.equal(qamPages.getNextPageIndex(3, pages.length), 3);
+  assert.equal(qamPages.getPreviousPageIndex(0, pages.length), 0);
+});
+check("pages: unknown id falls back safely", () => {
+  const pages = [P("ocr", "OCR"), P("regions", "Regions")];
+  assert.equal(qamPages.pageIndexById(pages, "missing"), 0);
+  assert.equal(qamPages.getNextPageIndex(qamPages.pageIndexById(pages, "missing"), pages.length), 1);
+});
+check("pages: empty page list is safe", () => {
+  assert.equal(qamPages.getPreviousPageIndex(0, 0), 0);
+  assert.equal(qamPages.getNextPageIndex(0, 0), 0);
+  assert.equal(qamPages.clampPageIndex(5, 2), 1);
+});
+check("pages: click and shoulder share one page index", () => {
+  const pages = [P("ocr", "OCR"), P("regions", "Regions")];
+  // Click "regions" -> index 1; then L1 -> index 0; then R1 -> index 1.
+  const clicked = qamPages.pageIndexById(pages, "regions");
+  assert.equal(pages[clicked].id, "regions");
+  assert.equal(pages[qamPages.getPreviousPageIndex(clicked, pages.length)].id, "ocr");
+  assert.equal(pages[qamPages.getNextPageIndex(0, pages.length)].id, "regions");
 });
 
 // -- region draft session lifetime --------------------------------------------
@@ -545,6 +588,7 @@ check("region editor: dropdowns use profile_id/region_id", () => {
 });
 check("region editor: preview, enabled, area, appearance retained", () => {
   assert.ok(regionComponentSrc.includes("Show Region Preview"));
+  assert.ok(regionComponentSrc.includes("Hide Region Preview"));
   assert.ok(regionComponentSrc.includes("[x] Enabled"));
   assert.ok(regionComponentSrc.includes('label="X%"'));
   assert.ok(regionComponentSrc.includes('label="Y%"'));
@@ -552,6 +596,28 @@ check("region editor: preview, enabled, area, appearance retained", () => {
   assert.ok(regionComponentSrc.includes('label="H%"'));
   assert.ok(regionComponentSrc.includes("panelStyleLabel"));
   assert.ok(regionComponentSrc.includes("regionFontSizeSet(selectedId, size)"));
+});
+check("region editor: primary + preview are stacked equal-width rows", () => {
+  // Two consecutive full-width PanelSectionRow ButtonItems (no 2-col grid row).
+  const primary = regionComponentSrc.indexOf('{selectedIsPrimary ? "Primary Region" : "Set as Primary"}');
+  const preview = regionComponentSrc.indexOf('{previewOn ? "Hide Region Preview" : "Show Region Preview"}');
+  assert.ok(primary >= 0 && preview > primary);
+  const between = regionComponentSrc.slice(primary, preview);
+  assert.ok(between.includes("</PanelSectionRow>"));
+  assert.ok(between.includes("<PanelSectionRow>"));
+  assert.ok(between.includes("</ButtonItem>"));
+  assert.ok(between.includes("<ButtonItem"));
+  assert.equal(between.includes("rowActionsStyle"), false);
+});
+check("region editor: dropdown selection does not mutate page state", () => {
+  for (const needle of ["setActiveId", "goToPage", "goPreviousPage", "goNextPage", "activePage", "activeId"]) {
+    assert.equal(regionComponentSrc.includes(needle), false, `region editor contains ${needle}`);
+  }
+});
+check("region editor: no per-dropdown forced page navigation", () => {
+  for (const needle of ['setPage("regions")', "setPage('regions')", 'setActiveTab("regions")', "onShowTab"]) {
+    assert.equal(regionComponentSrc.includes(needle), false, needle);
+  }
 });
 check("region editor: dropdown value normalization retained", () => {
   assert.equal(r.dropdownOptionValue({ data: "abc" }), "abc");

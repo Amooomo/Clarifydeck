@@ -2430,6 +2430,32 @@ Status: LOCAL PASS / DEVICE TEST PENDING
 - no backend, capture, OCR, stabilizer, Fast Accept, renderer, transport or
   packaging changes; `@decky/ui` stays at 4.12.1.
 
+## Phase 2P.1C — scoped QAM page navigation
+
+Status: LOCAL PASS / DEVICE TEST PENDING
+
+- Stage A audit of `@decky/ui` 4.12.1 found the scoped `Focusable` +
+  `FooterLegendProps.onButtonDown` API (`GamepadButton.BUMPER_LEFT` /
+  `BUMPER_RIGHT`) as the safe, content-scoped shoulder mechanism. Rejected as
+  unsafe/global: `SteamClient.Input.RegisterForControllerInputMessages`,
+  `FocusNavController`/`GamepadNavTree`, and window/document key listeners.
+- the Decky `Tabs` component was the cause of the QAM focus instability (its tab
+  row is skipped by the QAM sidebar focus chain, and its `onShowTab` state
+  conflict reset the active page to OCR on Dropdown selection). It was replaced
+  by ClarifyDeck-owned page state (`PAGES` + `activeId`) with a compact clickable
+  page header. Click and shoulder paths share one `goToPage`/`goPreviousPage`/
+  `goNextPage` state.
+- L1/R1 = previous/next page, non-wrapping (`src/qamPages.ts`:
+  `getPreviousPageIndex`, `getNextPageIndex`, `pageIndexById`), data-driven so
+  future pages can be appended without touching shoulder logic. The scoped
+  `Focusable` handler calls `stopPropagation` and only acts while ClarifyDeck
+  content owns focus, yielding to Dropdown/Modal contexts.
+- Region Preview button is now a full-width row directly below `Set as Primary`
+  (same width/height/style family), labelled `Show Region Preview` /
+  `Hide Region Preview`; `Enabled` remains a separate control.
+- the Phase 2P.1B region draft session, preview, profile/region persistence and
+  all backend/runtime invariants are unchanged.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

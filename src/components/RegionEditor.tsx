@@ -644,14 +644,14 @@ export function RegionEditorSection() {
         </PanelSectionRow>
       ) : null}
       <PanelSectionRow>
-        <div style={rowActionsStyle}>
-          <ButtonItem layout="below" disabled={primaryDisabled} onClick={setPrimary}>
-            {selectedIsPrimary ? "Primary Region" : "Set as Primary"}
-          </ButtonItem>
-          <ButtonItem layout="below" disabled={busy} onClick={() => setPreviewOn(!previewOn)}>
-            {previewOn ? "[x] Show Region Preview" : "[ ] Show Region Preview"}
-          </ButtonItem>
-        </div>
+        <ButtonItem layout="below" disabled={primaryDisabled} onClick={setPrimary}>
+          {selectedIsPrimary ? "Primary Region" : "Set as Primary"}
+        </ButtonItem>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ButtonItem layout="below" disabled={busy} onClick={() => setPreviewOn(!previewOn)}>
+          {previewOn ? "Hide Region Preview" : "Show Region Preview"}
+        </ButtonItem>
       </PanelSectionRow>
       {selected ? (
         <>
