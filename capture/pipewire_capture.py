@@ -441,6 +441,26 @@ class GstPipeWireAdapter:
         self._frames_pulled += 1
         return frame
 
+    @staticmethod
+    def _normalize_map_result(map_result):
+        """Normalize ``Gst.Buffer.map`` to ``(ok, mapinfo)``.
+
+        Real PyGObject returns a GI ``_ResultTuple`` ``(success, MapInfo)``;
+        some bindings/test doubles return a ``MapInfo`` directly. The result
+        tuple is never handed to ``buffer.unmap``.
+        """
+        if hasattr(map_result, "data"):
+            # Direct MapInfo (test doubles / alternative bindings).
+            return True, map_result
+        try:
+            map_ok, mapinfo = map_result
+        except Exception as exc:
+            raise CaptureError(
+                "pipewire_map_failed",
+                f"unexpected map result: {type(map_result).__name__}",
+            ) from exc
+        return bool(map_ok), mapinfo
+
     def _sample_to_frame(self, sample) -> PipeWireFrame:
         Gst = self._Gst
         buffer = sample.get_buffer()
@@ -453,7 +473,10 @@ class GstPipeWireAdapter:
         fmt = str(structure.get_value("format"))
 
         map_started = self._clock()
-        mapinfo = buffer.map(Gst.MapFlags.READ)
+        map_result = buffer.map(Gst.MapFlags.READ)
+        map_ok, mapinfo = self._normalize_map_result(map_result)
+        if not map_ok or mapinfo is None:
+            raise CaptureError("pipewire_map_failed", "Gst.Buffer.map returned false")
         try:
             data = bytes(mapinfo.data)
         finally:

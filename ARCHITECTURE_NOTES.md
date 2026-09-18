@@ -2296,6 +2296,24 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
 - no architecture/OCR/Fast-Accept/renderer/UI/default-backend changes; no
   systemd `XDG_RUNTIME_DIR` override is required.
 
+## Phase 2N.6.3 — Gst buffer map result-shape hotfix
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+- confirmed device root cause: real PyGObject `Gst.Buffer.map()` returns a GI
+  `_ResultTuple` `(success, MapInfo)`, not a `MapInfo`; the old code read
+  `mapinfo.data` from the tuple, so every pull failed with
+  `AttributeError: '_ResultTuple' object has no attribute 'data'` (producer:
+  5 attempted / 0 succeeded).
+- `GstPipeWireAdapter._normalize_map_result` accepts both shapes: a direct
+  `MapInfo` (test doubles / alternative bindings) or an iterable
+  `(success, MapInfo)` result. It raises `CaptureError("pipewire_map_failed")`
+  for a false or malformed result, and `buffer.unmap` is always called with the
+  `MapInfo` (never the result tuple).
+- pull semantics unchanged (`appsink.try_pull_sample`, `max-buffers=1 drop=true
+  sync=false`); GstApp and XDG-runtime hotfixes retained; no
+  architecture/OCR/renderer/UI/default-backend changes.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

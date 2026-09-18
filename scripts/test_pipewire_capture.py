@@ -13,6 +13,7 @@ Run:
 from __future__ import annotations
 
 import builtins
+import asyncio
 import os
 import sys
 import types
@@ -36,6 +37,8 @@ from capture.backend import (  # noqa: E402
 from capture.errors import CaptureError  # noqa: E402
 from capture.frame import CaptureFrame, DecodedFrame  # noqa: E402
 from capture.gamescope_capture import GamescopeCapture  # noqa: E402
+from capture.latest_frame_queue import LatestFrameQueue  # noqa: E402
+from capture.producer import CaptureProducer  # noqa: E402
 from capture.recognition_regions import RecognitionRegion  # noqa: E402
 from ocr.multi_region import MultiRegionOCRCoordinator  # noqa: E402
 
@@ -312,16 +315,37 @@ class FakeCaps:
         return FakeStructure(self._values)
 
 
+class _GILikeMapResult:
+    """Iterable-only GI ``_ResultTuple`` stand-in (deliberately no ``.data``)."""
+
+    def __init__(self, ok, mapinfo):
+        self._items = (ok, mapinfo)
+
+    def __iter__(self):
+        return iter(self._items)
+
+
 class FakeBuffer:
-    def __init__(self, data, pts=0):
+    def __init__(self, data, pts=0, map_mode="direct"):
         self._data = data
         self.pts = pts
+        self.map_mode = map_mode  # direct | tuple | gilike | false | malformed
+        self.mapinfo = SimpleNamespace(data=data)
+        self.unmapped = []
 
     def map(self, _flags):
-        return SimpleNamespace(data=self._data)
+        if self.map_mode == "direct":
+            return self.mapinfo
+        if self.map_mode == "tuple":
+            return (True, self.mapinfo)
+        if self.map_mode == "gilike":
+            return _GILikeMapResult(True, self.mapinfo)
+        if self.map_mode == "false":
+            return (False, self.mapinfo)
+        return object()  # malformed
 
-    def unmap(self, _info):
-        return None
+    def unmap(self, info):
+        self.unmapped.append(info)
 
     def get_video_meta(self):
         return None
@@ -571,6 +595,110 @@ class SampleConversionTest(unittest.TestCase):
         with self.assertRaises(CaptureError) as ctx:
             adapter._sample_to_frame(FakeSample(None, buffer))
         self.assertEqual(ctx.exception.code, "pipewire_missing_caps")
+
+
+class MapResultTest(unittest.TestCase):
+    _YUV = bytes([16, 16, 16, 16, 128, 128])
+
+    def _frame(self, map_mode):
+        adapter = _AdapterHarness()
+        caps = FakeCaps({"width": 2, "height": 2, "format": "NV12"})
+        buffer = FakeBuffer(self._YUV, map_mode=map_mode)
+        frame = adapter._sample_to_frame(FakeSample(caps, buffer))
+        return frame, buffer
+
+    def test_tuple_map_result(self) -> None:
+        frame, buffer = self._frame("tuple")
+        self.assertEqual(frame.rgba, bytes([0, 0, 0, 255]) * 4)
+        self.assertEqual(buffer.unmapped, [buffer.mapinfo])
+
+    def test_gi_like_iterable_result(self) -> None:
+        frame, buffer = self._frame("gilike")
+        self.assertEqual(frame.rgba, bytes([0, 0, 0, 255]) * 4)
+        self.assertEqual(buffer.unmapped, [buffer.mapinfo])
+
+    def test_direct_mapinfo_result(self) -> None:
+        frame, buffer = self._frame("direct")
+        self.assertEqual(frame.rgba, bytes([0, 0, 0, 255]) * 4)
+        self.assertEqual(buffer.unmapped, [buffer.mapinfo])
+
+    def test_map_false_rejected(self) -> None:
+        adapter = _AdapterHarness()
+        caps = FakeCaps({"width": 2, "height": 2, "format": "NV12"})
+        buffer = FakeBuffer(self._YUV, map_mode="false")
+        with self.assertRaises(CaptureError) as ctx:
+            adapter._sample_to_frame(FakeSample(caps, buffer))
+        self.assertEqual(ctx.exception.code, "pipewire_map_failed")
+
+    def test_malformed_map_result_rejected(self) -> None:
+        adapter = _AdapterHarness()
+        caps = FakeCaps({"width": 2, "height": 2, "format": "NV12"})
+        buffer = FakeBuffer(self._YUV, map_mode="malformed")
+        with self.assertRaises(CaptureError) as ctx:
+            adapter._sample_to_frame(FakeSample(caps, buffer))
+        self.assertEqual(ctx.exception.code, "pipewire_map_failed")
+
+    def test_unmap_receives_only_mapinfo(self) -> None:
+        _frame, buffer = self._frame("tuple")
+        self.assertEqual(len(buffer.unmapped), 1)
+        self.assertIs(buffer.unmapped[0], buffer.mapinfo)
+        self.assertNotIsInstance(buffer.unmapped[0], tuple)
+
+    def test_frame_counter_increments(self) -> None:
+        caps = FakeCaps({"width": 2, "height": 2, "format": "NV12"})
+        sample = FakeSample(caps, FakeBuffer(self._YUV, map_mode="tuple"))
+        adapter = _AdapterHarness()
+        adapter._appsink = _FakeAppsink(sample)
+        self.assertIsNotNone(adapter.try_pull_sample(0.1))
+        self.assertIsNotNone(adapter.try_pull_sample(0.1))
+        self.assertEqual(adapter.status()["frames_pulled"], 2)
+
+    def test_first_backend_frame_logs(self) -> None:
+        logs: list = []
+        backend = PipeWireCaptureBackend(adapter=FakeAdapter(), logger=logs.append)
+        backend.start()
+        backend.capture_frame(timeout=0.1)
+        self.assertTrue(any("[capture-pipewire] frame seq=1" in line for line in logs))
+
+
+async def _inline_runner(fn, *args):
+    return fn(*args)
+
+
+class _ProducerClock:
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+    async def sleep(self, delay: float) -> None:
+        self.t += delay
+        await asyncio.sleep(0)
+
+
+class ProducerQueueIntegrationTest(unittest.TestCase):
+    def test_decoded_frame_reaches_producer_queue(self) -> None:
+        async def run():
+            clock = _ProducerClock()
+            backend = PipeWireCaptureBackend(adapter=FakeAdapter())
+            backend.start()
+            queue = LatestFrameQueue()
+            producer = CaptureProducer(
+                backend, queue, clock=clock, sleep=clock.sleep, runner=_inline_runner
+            )
+            await producer.start()
+            for _ in range(20):
+                clock.t += 0.5
+                await asyncio.sleep(0)
+            status = await producer.stop()
+            return status, queue, backend
+
+        status, queue, backend = asyncio.run(run())
+        self.assertGreater(status["frames_succeeded"], 0)
+        self.assertEqual(status["frames_failed"], 0)
+        self.assertGreater(queue.stats().produced, 0)
+        self.assertGreater(backend.status()["frames_pulled"], 0)
 
 
 class _RegionRuntime:
