@@ -80,3 +80,4 @@ htmlcov/
 __pycache__/
 *.pyc
 *.pyo
+Clarifydeck-prod-out/
