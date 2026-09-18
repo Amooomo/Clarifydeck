@@ -36,9 +36,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from capture import gamescope_capture, recognition_roi, roi as ocr_roi_mod  # noqa: E402
-from capture.change_detector import decode_png_ex  # noqa: E402
+from capture.backend import resolve_capture_backend  # noqa: E402
+from capture.change_detector import decode_frame_ex, decode_png_ex  # noqa: E402
 from capture.errors import CaptureError  # noqa: E402
-from capture.frame import CaptureFrame  # noqa: E402
+from capture.frame import CaptureFrame, DecodedFrame  # noqa: E402
 from capture.latest_frame_queue import LatestFrameQueue  # noqa: E402
 from capture.producer import CaptureProducer  # noqa: E402
 from capture.scheduler import OCRChangeGate, validate_force_interval  # noqa: E402
@@ -82,7 +83,10 @@ def process_frame_timed(frame: CaptureFrame, *, runtime: OCRRuntime, app_id=None
     """Same as process_frame but returns per-stage monotonic timings."""
     timings: dict = {}
     decode_started = time.perf_counter()
-    decoded = decode_png_ex(frame.encoded_bytes)
+    if isinstance(frame, DecodedFrame):
+        decoded = decode_frame_ex(frame)
+    else:
+        decoded = decode_png_ex(frame.encoded_bytes)
     decode_done = time.perf_counter()
     roi_frame = recognition_roi.extract_recognition_roi(
         decoded.rgba, decoded.width, decoded.height, app_id, resolver=resolver
@@ -91,6 +95,9 @@ def process_frame_timed(frame: CaptureFrame, *, runtime: OCRRuntime, app_id=None
     result = runtime.recognize_rgba(roi_frame.rgba, roi_frame.width, roi_frame.height, sequence=frame.sequence)
     ocr_done = time.perf_counter()
     timings["decode_ms"] = round((decode_done - decode_started) * 1000.0, 3)
+    conversion_ms = getattr(frame, "conversion_ms", None)
+    if conversion_ms is not None:
+        timings["frame_conversion_ms"] = round(float(conversion_ms), 3)
     timings["roi_crop_ms"] = round((crop_done - decode_done) * 1000.0, 3)
     timings["ocr_wall_ms"] = round((ocr_done - crop_done) * 1000.0, 3)
     timings.update(runtime.last_timings)
@@ -440,7 +447,7 @@ class OCRDiagnostic:
         # Phase 2N.3: one concise latency line per changed Stable Text (stderr only,
         # never the machine JSONL stream). No text content is logged.
         for sample in self._multi_region_coordinator.drain_latency():
-            print(
+            line = (
                 "[latency] region={region} frame={frame} "
                 "capture_age_at_ocr_start_ms={age} decode_ms={decode} roi_ms={roi} "
                 "ocr_ms={ocr} stabilizer_accept_ms={stab} worker_total_ms={total}".format(
@@ -452,9 +459,12 @@ class OCRDiagnostic:
                     ocr=sample.get("ocr_ms"),
                     stab=sample.get("stabilizer_accept_ms"),
                     total=sample.get("worker_total_ms"),
-                ),
-                flush=True,
+                )
             )
+            if sample.get("frame_conversion_ms") is not None:
+                # PipeWire-only optional field; the legacy fields keep their meaning.
+                line += " frame_conversion_ms={conv}".format(conv=sample.get("frame_conversion_ms"))
+            print(line, flush=True)
         # Phase 2N.4: one concise first-candidate reliability line per accepted
         # transition (stderr only; no text content, digests/lengths only).
         for record in self._multi_region_coordinator.drain_audit():
@@ -561,9 +571,13 @@ class OCRDiagnostic:
     async def run_live(self) -> int:
         self._queue = LatestFrameQueue()
         if self.args.live:
-            capture = gamescope_capture.GamescopeCapture(logger=lambda m: print(m, file=sys.stderr))
+            capture = resolve_capture_backend(
+                getattr(self.args, "capture_backend", None),
+                logger=lambda m: print(m, file=sys.stderr),
+            )
         else:
             capture = _MockCapture(self.args)
+        self._capture_backend = capture
         self._producer = CaptureProducer(
             capture, self._queue, target_fps=self.args.fps, logger=lambda m: print(m, flush=True)
         )
@@ -599,6 +613,9 @@ class OCRDiagnostic:
         self.state = OCRState.RUNNING
         self._consumer_task = asyncio.create_task(self._consume())
         try:
+            if hasattr(capture, "start"):
+                # PipeWire: connect the persistent stream before the producer pulls.
+                await asyncio.to_thread(capture.start)
             await self._producer.start()
             await asyncio.sleep(self.args.duration_sec)
             return self._finalize()
@@ -628,7 +645,10 @@ class OCRDiagnostic:
             if self._no_ocr:
                 # capture + decode + crop only; the OCR engine is never touched
                 try:
-                    decoded = decode_png_ex(frame.encoded_bytes)
+                    if isinstance(frame, DecodedFrame):
+                        decoded = decode_frame_ex(frame)
+                    else:
+                        decoded = decode_png_ex(frame.encoded_bytes)
                     roi = recognition_roi.extract_recognition_roi(
                         decoded.rgba, decoded.width, decoded.height, self.args.app_id, resolver=self.resolver
                     )
@@ -765,7 +785,10 @@ class OCRDiagnostic:
     def _gated_frame(self, frame):
         """Decode + crop once, run the change gate, and OCR only when required."""
         decode_started = time.perf_counter()
-        decoded = decode_png_ex(frame.encoded_bytes)
+        if isinstance(frame, DecodedFrame):
+            decoded = decode_frame_ex(frame)
+        else:
+            decoded = decode_png_ex(frame.encoded_bytes)
         decode_done = time.perf_counter()
         roi_frame = recognition_roi.extract_recognition_roi(
             decoded.rgba,
@@ -823,6 +846,15 @@ class OCRDiagnostic:
         stop_event = getattr(self, "_stop_event", None)
         if stop_event is not None:
             stop_event.set()
+
+        # Stop the capture backend after the producer (no more pulls) so the
+        # PipeWire pipeline transitions to NULL before the worker exits.
+        backend = getattr(self, "_capture_backend", None)
+        if backend is not None and hasattr(backend, "stop"):
+            try:
+                await asyncio.to_thread(backend.stop)
+            except Exception as exc:
+                print(f"[ocr] capture_backend_stop_failed detail={exc}", flush=True)
 
         consumer = getattr(self, "_consumer_task", None)
         if consumer is not None and not consumer.done():
@@ -1167,6 +1199,12 @@ def main(argv=None) -> int:
         "--multi-region",
         action="store_true",
         help="opt-in multi-region OCR execution (v2 region-tagged output)",
+    )
+    parser.add_argument(
+        "--capture-backend",
+        default=None,
+        choices=("screenshot", "pipewire"),
+        help="capture frame source (default: CLARIFYDECK_CAPTURE_BACKEND or screenshot)",
     )
     parser.add_argument("--change-gate", action="store_true", help="skip OCR when the ROI is unchanged")
     parser.add_argument("--force-ocr-interval-sec", type=float, default=3.0)

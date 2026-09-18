@@ -2182,6 +2182,76 @@ Status: LOCAL PASS / DEVICE RETEST PENDING (not a new stable baseline)
 - no capture/OCR-runtime/renderer/transport-schema/overlay-delivery changes; no
   new dependency; no persisted telemetry; no QAM UI.
 
+## Phase 2N.5A — cross-game device result
+
+Status: DEVICE PASS (two games)
+
+- validated on Lies of P and Sekiro; no visible text flicker and no A/B
+  ping-pong observed.
+- Sekiro: 53 fast accepts, 52 next-candidate matches (98.11%); median realized
+  saving ≈ 996 ms.
+- the fast-accept path and its consensus fallback therefore remained stable
+  across two games/fonts. `437ad63` is the cross-game validated functional
+  baseline.
+
+## Phase 2N.6 — Gamescope PipeWire capture backend prototype
+
+Status: LOCAL PASS / DEVICE PIPEWIRE RETEST PENDING
+
+Feasibility evidence (Steam Deck device, established before implementation):
+
+- Gamescope publishes a PipeWire node (`node.name=gamescope`,
+  `media.class=Video/Source`, `stream.is-live=true`); object id/serial are not
+  stable and are never hard-coded.
+- continuous stream proven: `pipewiresrc target-object=gamescope
+  keepalive-time=33 ! queue max-size-buffers=1 leaky=downstream !
+  video/x-raw,format=NV12 ! fakesink`, negotiated 1280x800 NV12.
+- in-memory mapping proven: Python `appsink` mapped CPU-readable NV12 at
+  ~89.95 FPS; a 1280x800 frame is 1,536,000 bytes (`1280*800*1.5`).
+- layer composition (diagnostic images): the persistent ClarifyDeck X11 overlay
+  was absent from the tested PipeWire frame; a bottom-right Steam/Decky
+  notification was visible. This is observed device behavior, not a universal
+  Gamescope guarantee (device regression test required).
+- connection readiness may transiently report `target not found`; the system
+  plugin was `/usr/lib/gstreamer-1.0/libgstpipewire.so` 1.6.4.
+- a one-off `gst_mini_object_unref` GStreamer-CRITICAL warning was observed at
+  startup while frames flowed normally; it is recorded as known non-fatal (a real
+  bus ERROR or no frames remains fatal).
+
+Prototype architecture:
+
+- `capture/backend.py` selects between `ScreenshotCaptureBackend` (default,
+  unchanged) and `PipeWireCaptureBackend`; both expose
+  `start()/stop()/capture_frame()/status()` and feed the existing
+  `CaptureProducer` -> `LatestFrameQueue` -> consumer.
+- `capture/pipewire_capture.py` lazily imports `gi`/`Gst` (never at module
+  import), builds `pipewiresrc target-object=gamescope keepalive-time=33 !
+  video/x-raw,format=NV12 ! queue max-size-buffers=1 leaky=downstream !
+  appsink max-buffers=1 drop=true sync=false`, and maps/converts exactly one
+  sample per capture tick. There is no per-source-frame Python callback and no
+  unbounded queue. Startup retries are bounded (~5 s window, ~0.5 s backoff) and
+  cancellable by Stop OCR; bus ERROR/EOS/no-frame fail the session clearly.
+- the only new boundary is `capture/frame.py::DecodedFrame` +
+  `capture/change_detector.py::decode_frame_ex`: the PipeWire backend converts
+  NV12 -> RGBA once (OpenCV/numpy when available, dependency-free fallback
+  otherwise, honouring stride/offset metadata) and hands the unchanged Region
+  crop/coordinator the same decoded representation used by the PNG path.
+- `decode_ms` keeps its meaning (decoder wrapper cost, ~0 for a decoded frame);
+  the PipeWire-only `frame_conversion_ms` is added to the existing `[latency]`
+  line when present. No PNG is encoded/written/decoded on the PipeWire path and
+  the screenshot API is never invoked while PipeWire is active (no silent
+  fallback).
+- selector: development-only `CLARIFYDECK_CAPTURE_BACKEND=pipewire` (default
+  `screenshot`). `OCRWorkerManager` reads it and forwards an explicit
+  `--capture-backend` to the worker; the worker also accepts
+  `--capture-backend`. No QAM UI, no persistence, no default flip.
+- device deployment: set the variable in the environment of the Decky plugin
+  loader process (or pass `--capture-backend pipewire` to `scripts/ocr_worker.py`
+  directly) so the OCR worker inherits it.
+- explicitly out of scope for this phase: DMABUF/zero-copy, renderer changes,
+  Gamescope X11 property changes, Change Gate + PipeWire combination, OCR/FPS
+  tuning, and removing the screenshot backend.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

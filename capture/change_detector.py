@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 from typing import Callable, Optional
 
 from .errors import CaptureError
-from .frame import CaptureFrame
+from .frame import CaptureFrame, DecodedFrame
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
@@ -426,6 +426,41 @@ def decode_png(data: bytes) -> tuple[int, int, bytes]:
     return result.width, result.height, result.rgba
 
 
+def decode_frame_ex(
+    frame,
+    backend: str = "auto",
+    collect_filters: bool = False,
+) -> DecodeResult:
+    """Decode any in-memory capture frame to RGBA at one boundary (Phase 2N.6).
+
+    ``CaptureFrame`` (PNG bytes) uses the existing decoder; ``DecodedFrame``
+    (already RGBA from the PipeWire backend) is wrapped without any PNG work.
+    The synthetic ``PngStructure`` for a decoded frame is metadata only; its
+    pixel fields are not used by the change signature.
+    """
+    if isinstance(frame, DecodedFrame):
+        return DecodeResult(
+            width=frame.width,
+            height=frame.height,
+            rgba=frame.rgba,
+            decoder_backend=frame.source_backend or "decoded",
+            decoder_fallback_reason=None,
+            structure=PngStructure(
+                width=frame.width,
+                height=frame.height,
+                bit_depth=8,
+                color_type=6,
+                interlace=0,
+                idat_bytes=0,
+                bpp=4,
+                row_bytes=frame.width * 4,
+                filter_histogram={},
+            ),
+            decode_total_ms=round(float(frame.decode_ms or 0.0), 3),
+        )
+    return decode_png_ex(frame.encoded_bytes, backend=backend, collect_filters=collect_filters)
+
+
 def luminance_signature(rgba: bytes, width: int, height: int, grid: tuple[int, int] = DEFAULT_GRID) -> tuple[int, ...]:
     """Downsampled grayscale signature (2x2 samples per grid cell)."""
     gw, gh = grid
@@ -534,8 +569,8 @@ class FrameChangeDetector:
 
         started = self._clock()
         try:
-            decoded = decode_png_ex(
-                frame.encoded_bytes,
+            decoded = decode_frame_ex(
+                frame,
                 backend=self._decoder_backend,
                 collect_filters=self._collect_filters,
             )

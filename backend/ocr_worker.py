@@ -34,6 +34,10 @@ MODEL_SUBDIR = ("models", "ppocrv6")
 ROI_CONFIG_NAME = "recognition_roi.json"
 REQUIRED_MODEL_FILES = ("PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_small.onnx")
 
+# Phase 2N.6: development-only capture backend selector (default screenshot).
+CAPTURE_BACKEND_ENV = "CLARIFYDECK_CAPTURE_BACKEND"
+CAPTURE_BACKEND_CHOICES = ("screenshot", "pipewire")
+
 
 class OCRWorkerError(RuntimeError):
     def __init__(self, code: str, message: str = "") -> None:
@@ -117,6 +121,7 @@ class OCRWorkerManager:
         self._exit_code: Optional[int] = None
         self._last_error: Optional[str] = None
         self._change_gate = False
+        self._capture_backend: Optional[str] = None
         self._lock = threading.RLock()
 
     # -- introspection -----------------------------------------------------
@@ -155,6 +160,7 @@ class OCRWorkerManager:
                 "exit_code": self._exit_code,
                 "last_error": self._last_error,
                 "change_gate_enabled": self._change_gate,
+                "capture_backend": self._capture_backend,
                 "transport": transport,
                 "stderr_tail_count": len(self._stderr_tail),
                 "last_stderr_line": self._stderr_tail[-1] if self._stderr_tail else None,
@@ -170,6 +176,7 @@ class OCRWorkerManager:
         model_dir: Optional[str] = None,
         roi_config: Optional[str] = None,
         change_gate: bool = False,
+        capture_backend: Optional[str] = None,
     ) -> list[str]:
         if is_forbidden_interpreter(python_path):
             raise OCRWorkerError("forbidden_interpreter", python_path)
@@ -194,7 +201,20 @@ class OCRWorkerManager:
             command += ["--roi-config", str(resolved_roi)]
         if change_gate:
             command += ["--change-gate"]
+        if capture_backend:
+            command += ["--capture-backend", capture_backend]
         return command
+
+    @staticmethod
+    def _resolve_capture_backend(capture_backend: Optional[str]) -> Optional[str]:
+        """Resolve an explicit/env capture backend to a worker flag value."""
+        value = capture_backend if capture_backend is not None else os.environ.get(CAPTURE_BACKEND_ENV)
+        if value is None:
+            return None
+        name = str(value).strip().lower()
+        if name in CAPTURE_BACKEND_CHOICES:
+            return name
+        return None
 
     def _resolve_model_dir(self, model_dir: Optional[str]) -> Path:
         """Canonical PP-OCRv6 model dir; validates before spawn (no runtime download)."""
@@ -243,6 +263,7 @@ class OCRWorkerManager:
         model_dir: Optional[str] = None,
         roi_config: Optional[str] = None,
         change_gate: bool = False,
+        capture_backend: Optional[str] = None,
     ) -> dict:
         with self._lock:
             if self._state in (OCRWorkerState.STARTING, OCRWorkerState.RUNNING):
@@ -254,8 +275,14 @@ class OCRWorkerManager:
             self._state = OCRWorkerState.STARTING
             try:
                 python_path = self._python_resolver()
+                resolved_backend = self._resolve_capture_backend(capture_backend)
                 command = self.build_command(
-                    python_path, fps=fps, model_dir=model_dir, roi_config=roi_config, change_gate=change_gate
+                    python_path,
+                    fps=fps,
+                    model_dir=model_dir,
+                    roi_config=roi_config,
+                    change_gate=change_gate,
+                    capture_backend=resolved_backend,
                 )
                 env = os.environ.copy()
                 env["PYTHONNOUSERSITE"] = "1"
@@ -288,6 +315,7 @@ class OCRWorkerManager:
             self._last_error = None
             self._stop_requested = False
             self._change_gate = bool(change_gate)
+            self._capture_backend = resolved_backend
             self._started_monotonic = self._clock()
             self._stdout_thread = threading.Thread(target=self._read_stdout, name="ocr-worker-stdout", daemon=True)
             self._stderr_thread = threading.Thread(target=self._read_stderr, name="ocr-worker-stderr", daemon=True)

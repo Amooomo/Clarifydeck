@@ -20,7 +20,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Optional
 
-from capture.change_detector import decode_png_ex
+from capture.change_detector import decode_frame_ex, decode_png_ex
+from capture.frame import DecodedFrame
 from capture.recognition_regions import RecognitionRegion
 from capture.roi import NormalizedROI, PixelROI, crop_rgba, resolve_roi
 from ocr.stabilizer import FAST_ACCEPT_MIN_CONFIDENCE, OCRStabilizer, StableTextEvent
@@ -208,7 +209,10 @@ class MultiRegionOCRCoordinator:
     def process_frame(self, frame: Any, regions: Iterable[RecognitionRegion]) -> list[RegionStableTextEvent]:
         """Decode once, then OCR each enabled region from the same decoded frame."""
         decode_started = self._clock()
-        decoded = decode_png_ex(frame.encoded_bytes)
+        if isinstance(frame, DecodedFrame):
+            decoded = decode_frame_ex(frame)
+        else:
+            decoded = decode_png_ex(frame.encoded_bytes)
         decode_ms = round((self._clock() - decode_started) * 1000.0, 3)
         return self.process_decoded(
             decoded.rgba,
@@ -218,6 +222,7 @@ class MultiRegionOCRCoordinator:
             regions,
             captured_monotonic=getattr(frame, "captured_monotonic", None),
             decode_ms=decode_ms,
+            frame_conversion_ms=getattr(frame, "conversion_ms", None),
         )
 
     def process_decoded(
@@ -229,6 +234,7 @@ class MultiRegionOCRCoordinator:
         regions: Iterable[RecognitionRegion],
         captured_monotonic: Optional[float] = None,
         decode_ms: Optional[float] = None,
+        frame_conversion_ms: Optional[float] = None,
     ) -> list[RegionStableTextEvent]:
         enabled = [region for region in regions if region.enabled]
         self._discard_missing(enabled)
@@ -299,6 +305,7 @@ class MultiRegionOCRCoordinator:
                         state.stabilizer,
                         ocr_started,
                         ocr_ended,
+                        frame_conversion_ms,
                     )
         return events
 
@@ -314,6 +321,7 @@ class MultiRegionOCRCoordinator:
         stabilizer: OCRStabilizer,
         ocr_started: float,
         ocr_ended: float,
+        frame_conversion_ms: Optional[float] = None,
     ) -> None:
         ocr_ms = getattr(result, "elapsed_ms", None)
         if ocr_ms is None:
@@ -342,6 +350,10 @@ class MultiRegionOCRCoordinator:
                 else None
             ),
         }
+        if frame_conversion_ms is not None:
+            # Backend-specific, optional: NV12 -> RGBA conversion time under
+            # PipeWire. ``decode_ms`` remains the (near-zero) wrapper cost.
+            sample["frame_conversion_ms"] = round(float(frame_conversion_ms), 3)
         self._latency.append(sample)
 
     def reset(self) -> None:

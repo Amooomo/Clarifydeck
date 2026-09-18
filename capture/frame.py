@@ -79,3 +79,41 @@ class CaptureFrame:
             sequence=sequence,
             source_path=source_path,
         )
+
+
+@dataclass(frozen=True)
+class DecodedFrame:
+    """A frame already decoded to tightly packed RGBA in memory (Phase 2N.6).
+
+    Non-PNG capture backends (Gamescope PipeWire/GStreamer) convert their source
+    buffer to RGBA exactly once at the capture boundary and hand the existing
+    Region/OCR pipeline an ordinary decoded representation. No PNG is encoded,
+    written, or decoded on this path.
+    """
+
+    width: int
+    height: int
+    format: str
+    rgba: bytes
+    captured_monotonic: float
+    captured_wall_time: Optional[float]
+    source_backend: str
+    source_mode: str
+    sequence: int
+    decode_ms: float = 0.0
+    source_format: Optional[str] = None
+    source_width: Optional[int] = None
+    source_height: Optional[int] = None
+    capture_pull_ms: Optional[float] = None
+    conversion_ms: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.width <= 0 or self.height <= 0:
+            raise CaptureError("invalid_frame", "invalid dimensions")
+        if len(self.rgba) != self.width * self.height * 4:
+            raise CaptureError(
+                "invalid_frame",
+                f"rgba size {len(self.rgba)} != {self.width * self.height * 4}",
+            )
+        if self.sequence <= 0:
+            raise CaptureError("invalid_frame", "sequence must be positive")

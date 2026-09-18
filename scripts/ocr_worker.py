@@ -89,6 +89,12 @@ def _parse_args(argv=None) -> argparse.Namespace:
         action="store_true",
         help="opt-in multi-region OCR execution (v2 region-tagged output; not production-default)",
     )
+    parser.add_argument(
+        "--capture-backend",
+        default=None,
+        choices=("screenshot", "pipewire"),
+        help="capture frame source (default: CLARIFYDECK_CAPTURE_BACKEND or screenshot)",
+    )
     parser.add_argument("--min-line-confidence", type=float, default=0.70)
     parser.add_argument("--consensus-required", type=int, default=2)
     parser.add_argument("--history-size", type=int, default=3)
@@ -128,6 +134,7 @@ def _diagnostic_args(args: argparse.Namespace) -> argparse.Namespace:
         emit_stable_jsonl=True,
         diagnostic_ocr_evidence=args.diagnostic_ocr_evidence,
         multi_region=args.multi_region,
+        capture_backend=args.capture_backend,
     )
 
 
