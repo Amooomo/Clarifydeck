@@ -1,31 +1,106 @@
-BSD 3-Clause License
+ClarifyDeck Non-Commercial License
+Version 1.0
 
-Copyright (c) 2024, Hypothetical Plugin Developer
-Original Copyright (c) 2022-2024, Steam Deck Homebrew
+Copyright (c) 2026 ClarifyDeck contributors
 
-All rights reserved.
+1. Grant of Permission
 
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
+Subject to the terms of this License, permission is granted to any person obtaining
+a copy of the ClarifyDeck software and associated source code, documentation,
+assets, and other project materials (collectively, the "Software") to use, copy,
+modify, and redistribute the Software solely for non-commercial purposes.
 
-1. Redistributions of source code must retain the above copyright notice, this
-   list of conditions and the following disclaimer.
+Permitted non-commercial purposes include, without limitation:
 
-2. Redistributions in binary form must reproduce the above copyright notice,
-   this list of conditions and the following disclaimer in the documentation
-   and/or other materials provided with the distribution.
+- personal use;
+- learning and education;
+- academic or technical research;
+- non-commercial testing and evaluation;
+- non-commercial modification and redistribution.
 
-3. Neither the name of the copyright holder nor the names of its
-   contributors may be used to endorse or promote products derived from
-   this software without specific prior written permission.
+2. Commercial Use Prohibited
 
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+Without prior explicit written permission from the copyright holder, you may not:
+
+- sell the Software or any modified version of it;
+- charge a fee for access to, distribution of, or use of the Software;
+- provide paid services that substantially rely on the Software;
+- bundle the Software with a commercial product or paid service for profit;
+- use the Software or a modified version primarily for commercial advantage,
+  monetary compensation, or other commercial gain.
+
+Commercial licensing or cooperation may be separately authorized in writing by
+the copyright holder.
+
+3. Redistribution and Modification
+
+If you redistribute the Software or a modified version for a permitted
+non-commercial purpose, you must:
+
+- retain this LICENSE file;
+- retain existing copyright and attribution notices;
+- clearly state if you have modified the Software;
+- not represent your modified version as an official ClarifyDeck release unless
+  authorized by the copyright holder.
+
+4. No Trademark or Endorsement Rights
+
+This License does not grant permission to use the ClarifyDeck name, logo, or
+other project branding in a way that suggests sponsorship, endorsement, or
+official status of an unofficial or modified distribution.
+
+5. Third-Party Components
+
+ClarifyDeck may include, bundle, or depend on third-party software, libraries,
+models, fonts, binaries, or other components.
+
+Those third-party components remain subject to their own licenses, notices, and
+redistribution terms. This License applies only to the portions of ClarifyDeck
+for which the ClarifyDeck copyright holder has the authority to grant rights.
+
+Nothing in this License changes or restricts rights granted under applicable
+third-party licenses.
+
+6. No Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR
+A PARTICULAR PURPOSE, NON-INFRINGEMENT, ACCURACY, RELIABILITY, OR FITNESS FOR A
+PARTICULAR USE.
+
+7. Limitation of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE
+COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY CLAIM, DAMAGES, LOSS OF DATA,
+LOSS OF PROFITS, BUSINESS INTERRUPTION, OR OTHER LIABILITY, WHETHER IN CONTRACT,
+TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR
+THE USE OF THE SOFTWARE.
+
+8. Termination
+
+Your rights under this License terminate automatically if you materially violate
+its terms.
+
+Upon termination, you must stop using and distributing the Software in any way
+that is not otherwise permitted by law or by applicable third-party licenses.
+
+9. Separate Commercial Permission
+
+Nothing in this License prevents the copyright holder from offering separate
+commercial licenses, entering into commercial agreements, or granting additional
+permissions to specific parties.
+
+10. Scope
+
+This License is intended to permit broad non-commercial use while reserving
+commercial exploitation rights to the copyright holder.
+
+This License is not an Open Source Initiative (OSI) approved open-source license.
+
+---
+
+Project: ClarifyDeck
+Repository: https://github.com/Amooomo/Clarifydeck
+
+For commercial licensing or other permissions, please contact the project
+copyright holder through the project repository.

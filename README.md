@@ -1,138 +1,289 @@
 # ClarifyDeck
 
-ClarifyDeck is a Decky Loader plugin for Steam Deck. It lets the user define OCR regions for small in-game text, runs backend OCR against changed regions, and renders readable high-contrast overlay captions on top of the game.
+> Steam Deck 游戏内文字 OCR 辅助插件 / An OCR accessibility plugin for in-game text on Steam Deck.
 
-## Current architecture
+[中文](#中文) · [English](#english)
 
-- `main.py` is the backend SSOT for region state: `dict[box_id, BoxState]`.
-- `src/index.tsx` is the React/TypeScript Decky frontend.
-- The frontend never persists region coordinates locally; it calls backend RPC methods and listens for backend events.
-- The overlay is rendered with `pointer-events: none` and a very high `z-index`.
+---
 
-## Backend RPC/events
+# 中文
 
-RPC methods exposed by `main.py`:
+## 简介
 
-- `list_boxes()`
-- `add_box()`
-- `update_box(box_id, x, y, w, h)`
-- `remove_box(box_id)`
-- `get_status()`
+**ClarifyDeck** 是一款面向 Steam Deck 的 Decky Loader 插件，用于识别游戏画面中的小字、字幕、菜单文字等内容，并将识别结果以更清晰的文本框覆盖显示在游戏画面上。
 
-Backend events:
+你可以自行设置需要识别的屏幕区域，并为不同游戏或场景保存不同的 Profile / Region。ClarifyDeck 会在后台对指定区域进行 OCR 识别，并通过高对比度文本框显示结果，帮助提升 Steam Deck 小屏幕下的文字可读性。
 
-- `boxes_changed`: emitted after box add/update/remove.
-- `ocr_broadcast`: emitted after OCR text is recognized for a box.
+### 主要功能
 
-## Project-local conda environment
+- 自定义 OCR 识别区域
+- 支持多个 Profile 和多个 Region
+- 支持设置 Primary Region
+- Region Preview 区域预览
+- 深色 / 浅色文本框
+- 文本框透明度调节
+- 文本大小调节
+- Persistent Overlay 持续显示识别结果
+- 在 Steam Deck QAM 中直接控制 OCR 和 Overlay
+- 当前 OCR 方案基于 RapidOCR + PP-OCRv6 + ONNX Runtime
 
-All toolchain/dependency installation should stay under this project directory. The provided `environment.yml` uses USTC Anaconda mirror channels and disables default channels with `nodefaults`. Frontend packages are installed by the conda-provided `pnpm`, with `.npmrc` forcing the USTC npm registry and the project-local `./.pnpm-store`.
+---
 
-Windows PowerShell:
+## 安装
 
-```powershell
-.\scripts\setup-conda.ps1
-conda activate .\.conda
-pnpm build
+### 1. 安装 Decky Loader
+
+ClarifyDeck 需要 **Decky Loader** 才能运行。
+
+如果尚未安装 Decky Loader，请先按照 Decky Loader 官方说明完成安装。
+
+### 2. 下载 ClarifyDeck
+
+进入本项目 GitHub 的 **Releases** 页面，下载：
+
+```text
+ClarifyDeck-v0.1.0-SteamDeck.zip
 ```
 
-Linux/Steam Deck:
+> 请不要使用 GitHub 自动生成的 `Source code (zip)`，它只包含源码，不是完整的 Steam Deck 可安装版本。
 
-```bash
-bash scripts/setup-conda.sh
-conda activate ./.conda
-pnpm build
+### 3. 安装插件
+
+1. 在 Steam Deck 中切换到桌面模式。
+2. 解压 `ClarifyDeck-v0.1.0-SteamDeck.zip`。
+3. 将插件文件放入 Decky Loader 的插件目录，通常为：
+
+```text
+/home/deck/homebrew/plugins/ClarifyDeck
 ```
 
-The scripts create/update `./.conda`, force conda package downloads/cache into `./.conda-pkgs`, and install frontend dependencies into the project-local pnpm store `./.pnpm-store`. Do not use a global Node.js/pnpm toolchain for project dependency installation.
+最终应类似：
 
-
-## Local verification
-
-The backend can be smoke-tested without a running Decky loader:
-
-```bash
-python scripts/smoke_backend.py
+```text
+/home/deck/homebrew/plugins/ClarifyDeck/
+├── main.py
+├── plugin.json
+├── dist/
+├── runtime/
+├── models/
+└── ...
 ```
 
-After dependencies are installed through the project-local conda environment, verify the frontend bundle with:
+4. 重载 Decky Loader，或重新启动 Steam Deck。
+5. 返回游戏模式，在 QAM 的 Decky 插件列表中打开 **ClarifyDeck**。
 
-```bash
-pnpm build
+---
+
+## 使用方法
+
+### OCR 页面
+
+打开 ClarifyDeck 后，可以在 OCR 页面：
+
+- 启动 / 停止 OCR
+- 启用 / 禁用 Persistent Overlay
+- 查看当前 OCR 运行状态
+
+### Regions 页面
+
+在 Regions 页面可以：
+
+- 新建、删除和切换 Profile
+- 新建、删除和切换 Region
+- 设置 Primary Region
+- 开启 / 关闭 Region Preview
+- 调整识别区域的 X / Y / W / H
+- 开启或关闭某个 Region
+- 选择 Dark / Light 文本框
+- 调整 Panel Opacity
+- 调整 Text Size
+- 点击 **Save Changes** 保存设置
+
+建议先开启 **Show Region Preview**，确认识别区域覆盖了需要识别的文字位置，再开始 OCR。
+
+---
+
+## 研发测试说明
+
+ClarifyDeck 当前仍处于 **研发测试阶段**。
+
+虽然当前版本已在 Steam Deck 实机上完成多轮功能和稳定性测试，但仍可能存在：
+
+- 个别游戏或 SteamOS / Decky Loader 版本兼容问题
+- OCR 识别准确率差异
+- 特殊字体、动态字幕或复杂背景下识别效果下降
+- 未发现的 UI 或运行时问题
+
+本项目并非商业软件，也不提供任何商业级稳定性保证。
+
+如果你发现 Bug、兼容性问题或有功能建议，欢迎通过 GitHub Issues 反馈。
+
+---
+
+## 非商业使用声明
+
+本项目仅供：
+
+- 学习
+- 研究
+- 个人使用
+- 非商业测试
+
+**未经作者明确书面许可，禁止利用本项目及其修改版本进行商业销售、付费分发、收费服务或其他以商业获利为目的的使用。**
+
+如果需要进行商业合作或商业使用，请先联系项目作者并获得许可。
+
+> README 中的声明用于说明项目使用要求；正式发布时建议同时以仓库中的 `LICENSE` 文件为准。
+
+---
+
+## 支持项目
+
+如果 ClarifyDeck 对你有帮助，欢迎点击 GitHub 右上角的 **⭐ Star** 支持本项目。
+
+你的 Star、Bug 反馈和建议都会帮助 ClarifyDeck 继续完善。
+
+感谢支持！
+
+---
+
+# English
+
+## About
+
+**ClarifyDeck** is a Decky Loader plugin for Steam Deck that helps make small in-game text easier to read.
+
+You can define custom OCR regions for subtitles, menus, dialogue, UI text, or other parts of the game screen. ClarifyDeck recognizes text from those regions in the background and displays the result through a high-contrast persistent overlay.
+
+Different Profiles and Regions can be created for different games or situations.
+
+### Features
+
+- Custom OCR regions
+- Multiple Profiles and Regions
+- Primary Region support
+- Region Preview
+- Dark / Light text panels
+- Adjustable panel opacity
+- Adjustable text size
+- Persistent OCR overlay
+- OCR and Overlay controls directly from the Steam Deck QAM
+- Current OCR stack: RapidOCR + PP-OCRv6 + ONNX Runtime
+
+---
+
+## Installation
+
+### 1. Install Decky Loader
+
+ClarifyDeck requires **Decky Loader**.
+
+If Decky Loader is not installed yet, install it first by following the official Decky Loader instructions.
+
+### 2. Download ClarifyDeck
+
+Go to the **Releases** page of this GitHub repository and download:
+
+```text
+ClarifyDeck-v0.1.0-SteamDeck.zip
 ```
 
-## Screenshot spike (step 1)
+> Do not use GitHub's automatically generated `Source code (zip)`. It contains the source code only and is not the complete Steam Deck build.
 
-Before wiring capture into the plugin, validate that the Steam Deck can actually
-grab the gamescope frame. `scripts/capture_spike.py` probes every plausible
-backend (`grim`, `gst-launch-1.0 pipewiresrc`, the `xdg-desktop-portal`
-Screenshot method, and X11 fallbacks), writes each artifact to a known
-directory, and reports what worked.
+### 3. Install the plugin
 
-**Run it in game mode** (a `gamescope-*` socket must be present). A capture in
-desktop mode only proves the desktop compositor works, not the game frame. The
-script auto-`chmod +x`es the bundled `bin/grim` / `bin/tesseract`, only treats
-real compositor sockets as displays, and prints the detected session.
+1. Switch your Steam Deck to Desktop Mode.
+2. Extract `ClarifyDeck-v0.1.0-SteamDeck.zip`.
+3. Place the plugin files in the Decky Loader plugin directory, usually:
 
-On the Steam Deck:
-
-```bash
-python3 scripts/capture_spike.py
-python3 scripts/capture_spike.py --list
-python3 scripts/capture_spike.py --display gamescope-0
+```text
+/home/deck/homebrew/plugins/ClarifyDeck
 ```
 
-Output defaults to `~/Clarifydeck-spike` (`/home/deck/Clarifydeck-spike`). The
-script writes:
+The final structure should look similar to:
 
-- `report.txt` - full PASS/FAIL report with the exact commands and stderr.
-- `env.txt` - detected user/session/tools and enumerated PipeWire nodes.
-- `grim_*.png|ppm`, `gst_*.png|ppm`, `portal_screenshot.png`, `latest_capture.*`
-  - captured frames.
-
-Open `latest_capture.png` first. A backend only "passes" when the output has a
-valid PNG/PPM/PAM header and non-zero dimensions; PPM captures also report a
-`blank` flag so an all-black frame is obvious. Use `--out <dir>` to change the
-destination and `--backend grim|gst|portal|fallback` to isolate one path. Run it
-as the plugin does (root) to get a valid result: when root it automatically
-re-runs the capture commands via `sudo -u deck`.
-
-If no PipeWire `Video/Source` node is listed, raw `pipewiresrc` cannot work:
-SteamOS only exposes the gamescope screen-cast node after an
-`xdg-desktop-portal` ScreenCast session exists, which is why the portal backend
-is included.
-
-## Screenshot runtime notes
-
-The backend captures with the pipeline validated by the spike:
-
-```
-pipewiresrc num-buffers=1 ! videoconvert ! video/x-raw,format=RGB ! pnmenc ! filesink
+```text
+/home/deck/homebrew/plugins/ClarifyDeck/
+├── main.py
+├── plugin.json
+├── dist/
+├── runtime/
+├── models/
+└── ...
 ```
 
-`video/x-raw,format=RGB` is required so `pnmenc` emits a binary PPM (P6) instead
-of a PAM (P7) with alpha. Capture only works in game mode, where gamescope
-exposes a PipeWire `Video/Source` node; desktop mode fails with `target not
-found`. The capture runs as the `deck` user (`sudo -u deck` when the backend is
-root) with `XDG_RUNTIME_DIR=/run/user/1000`, uses a unique temp file per frame,
-and allows up to `CLARIFYDECK_CAPTURE_TIMEOUT` seconds (default `10`).
+4. Reload Decky Loader or restart your Steam Deck.
+5. Return to Gaming Mode and open **ClarifyDeck** from the Decky section of the QAM.
 
-## OCR runtime notes
+---
 
-The backend searches for Tesseract in these locations, in order, and will
-`chmod +x` a bundled binary whose executable bit was lost during install:
+## How to Use
 
-1. plugin-local `bin/tesseract`
-2. plugin-local `.conda/bin/tesseract`
-3. plugin-local `conda/bin/tesseract`
-4. `PATH`
+### OCR page
 
-Useful environment variables:
+From the OCR page you can:
 
-- `CLARIFYDECK_OCR_LANG` (default: `eng`)
-- `CLARIFYDECK_MSE_THRESHOLD` (default: `16.0`)
-- `CLARIFYDECK_SCREENSHOT_CMD` for overriding screenshot capture. Use `{output}` if the command writes to a file.
-- `CLARIFYDECK_XDG_RUNTIME_DIR` (default: `/run/user/1000`)
+- Start / Stop OCR
+- Enable / Disable the Persistent Overlay
+- Check the current OCR status
 
+### Regions page
 
-For languages beyond the Tesseract data bundled with your conda `tesseract` package, place traineddata files in one of the searched `tessdata` directories, for example `/home/deck/Clarifydeck/.conda/share/tessdata`, and set `CLARIFYDECK_OCR_LANG` accordingly.
+From the Regions page you can:
+
+- Create, delete, and switch Profiles
+- Create, delete, and switch Regions
+- Set a Primary Region
+- Show / Hide Region Preview
+- Adjust X / Y / W / H
+- Enable or disable individual Regions
+- Choose a Dark or Light panel
+- Adjust Panel Opacity
+- Adjust Text Size
+- Use **Save Changes** to save the configuration
+
+It is recommended to enable **Show Region Preview** first and make sure the region covers the in-game text you want to recognize.
+
+---
+
+## Development & Testing Status
+
+ClarifyDeck is currently a **research and testing project**.
+
+The current version has gone through multiple rounds of real-device testing on Steam Deck, but issues may still exist, including:
+
+- Compatibility differences between games, SteamOS versions, or Decky Loader versions
+- OCR accuracy differences between fonts and languages
+- Reduced recognition quality with complex backgrounds or moving text
+- Undiscovered UI or runtime bugs
+
+ClarifyDeck is not commercial software and does not provide commercial-grade reliability guarantees.
+
+If you find a bug, compatibility issue, or have a feature request, please open a GitHub Issue.
+
+---
+
+## Non-Commercial Use
+
+This project is intended only for:
+
+- Learning
+- Research
+- Personal use
+- Non-commercial testing
+
+**Commercial sale, paid redistribution, paid services, or any other use intended to generate commercial profit from this project or modified versions of it is prohibited without explicit written permission from the author.**
+
+For commercial cooperation or commercial use, please contact the project author first and obtain permission.
+
+> This section explains the intended usage restrictions. For formal distribution, the repository's `LICENSE` file should be treated as the authoritative license document.
+
+---
+
+## Support ClarifyDeck
+
+If ClarifyDeck is useful to you, please consider giving the project a **⭐ Star** on GitHub.
+
+Stars, bug reports, and feedback all help the project improve.
+
+Thank you for your support!
