@@ -20,6 +20,7 @@ import {
   clearRegionPreview,
   dropdownOptionValue,
   draftsForApply,
+  getRegionEditorDraftState,
   getRegionEditorSession,
   isPanelStyle,
   isRegionFontSize,
@@ -29,9 +30,11 @@ import {
   primaryRegionId,
   regionLabel,
   regionPreviewPayload,
+  rememberRegionEditorDraftState,
   rememberRegionPreview,
   rememberRegionSelection,
   removeRegion,
+  resetRegionEditorDraftState,
   resetRegionEditorSession,
   scopeAppId,
   setPrimaryRegion,
@@ -41,6 +44,7 @@ import {
   validateRegions,
   type RegionConfigPayload,
   type RegionDraft,
+  type RegionEditorProfileInfo,
   type RegionPreviewRegion,
 } from "../regionEditor";
 
@@ -49,13 +53,12 @@ const regionConfigSet = callable<[regions: RegionDraft[], appId: string | null],
 
 // Phase 2M.2C Region Profile ("Region Set") management. Each Region Set is an
 // independently persisted Region JSON file selected by stable profile_id.
-type RegionProfileInfo = { profile_id: string; label: string };
 type RegionProfilesPayload = {
   ok?: boolean;
   error?: string;
   detail?: string;
   active_profile_id?: string;
-  profiles?: RegionProfileInfo[];
+  profiles?: RegionEditorProfileInfo[];
   max_profiles?: number;
   last_error?: string | null;
 };
@@ -109,22 +112,34 @@ const regionAppearanceSave = callable<[regionId: string], AppearanceSaveResult>(
 const CURRENT_APP_ID: string | null = null;
 
 export function RegionEditorSection() {
+  // Resume the in-progress editor session if the QAM is still open (tab switch
+  // remount); otherwise hydrate fresh from backend on first load.
+  const initialDraft = useRef(getRegionEditorDraftState()).current;
+  const resume = initialDraft.active;
   const [config, setConfig] = useState<RegionConfigPayload | undefined>();
-  const [drafts, setDrafts] = useState<RegionDraft[]>([]);
-  const [configured, setConfigured] = useState(false);
+  const [drafts, setDrafts] = useState<RegionDraft[]>(() => (resume ? initialDraft.drafts : []));
+  const [configured, setConfigured] = useState(() => (resume ? initialDraft.configured : false));
   const [selectedId, setSelectedIdState] = useState<string | null>(
     () => getRegionEditorSession().selectedId,
   );
-  const [profiles, setProfiles] = useState<RegionProfileInfo[]>([]);
-  const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
-  const [maxProfiles, setMaxProfiles] = useState(8);
+  const [profiles, setProfiles] = useState<RegionEditorProfileInfo[]>(
+    () => (resume ? initialDraft.profiles : []),
+  );
+  const [activeProfileId, setActiveProfileId] = useState<string | null>(
+    () => (resume ? initialDraft.activeProfileId : null),
+  );
+  const [maxProfiles, setMaxProfiles] = useState(() => (resume ? initialDraft.maxProfiles : 8));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [previewOn, setPreviewOnState] = useState<boolean>(
     () => getRegionEditorSession().previewOn,
   );
-  const [styleByRegion, setStyleByRegion] = useState<Record<string, string>>({});
-  const [fontByRegion, setFontByRegion] = useState<Record<string, number>>({});
+  const [styleByRegion, setStyleByRegion] = useState<Record<string, string>>(
+    () => (resume ? initialDraft.styleByRegion : {}),
+  );
+  const [fontByRegion, setFontByRegion] = useState<Record<string, number>>(
+    () => (resume ? initialDraft.fontByRegion : {}),
+  );
   const mounted = useRef(true);
   const previewOnRef = useRef(false);
   const selectedIdRef = useRef<string | null>(selectedId);
@@ -201,11 +216,30 @@ export function RegionEditorSection() {
 
   useEffect(() => {
     mounted.current = true;
-    void load();
+    if (!resume) {
+      void load();
+    }
     return () => {
       mounted.current = false;
     };
   }, []);
+
+  // Keep the in-progress editor session alive across OCR <-> Regions switching.
+  useEffect(() => {
+    if (!mounted.current) {
+      return;
+    }
+    rememberRegionEditorDraftState({
+      active: true,
+      activeProfileId,
+      profiles,
+      maxProfiles,
+      configured,
+      drafts,
+      styleByRegion,
+      fontByRegion,
+    });
+  }, [activeProfileId, profiles, maxProfiles, configured, drafts, styleByRegion, fontByRegion]);
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
@@ -349,6 +383,7 @@ export function RegionEditorSection() {
       }
       clearRegionPreview();
       resetRegionEditorSession();
+      resetRegionEditorDraftState();
     },
     [],
   );
@@ -358,7 +393,10 @@ export function RegionEditorSection() {
     prevQamVisibleRef.current = qamVisible;
     qamVisibleRef.current = qamVisible;
     if (qamVisible) {
-      void load();
+      if (!wasVisible) {
+        // QAM reopened while this component stayed mounted: hydrate fresh.
+        void load();
+      }
       return;
     }
     if (!wasVisible) {
@@ -369,6 +407,7 @@ export function RegionEditorSection() {
     previewOnRef.current = false;
     setPreviewOnState(false);
     resetRegionEditorSession();
+    resetRegionEditorDraftState();
     void setRegionPreviewEnabled(false);
     void clearRegionPreviewRegions();
     clearRegionPreview();

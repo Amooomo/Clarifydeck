@@ -1,4 +1,5 @@
 import { staticClasses, Tabs } from "@decky/ui";
+import * as DeckyUiNS from "@decky/ui";
 import {
   addEventListener,
   callable,
@@ -7,7 +8,7 @@ import {
   routerHook,
   useQuickAccessVisible,
 } from "@decky/api";
-import { type CSSProperties, useEffect, useRef, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FaSearchPlus } from "react-icons/fa";
 import { OCRControlSection } from "./components/OCRControl";
 import { PersistentOverlaySection } from "./components/PersistentOverlayControl";
@@ -23,12 +24,44 @@ import {
 // -- Production QAM pages -----------------------------------------------------
 // Page 1 (OCR) is the day-to-day operating page; Page 2 (Regions) is the
 // authoritative region/profile editor. L1/R1 page switching is provided by the
-// native Steam/Decky `Tabs` component (locally scoped to this QAM content). If
-// the native tab component is unavailable, a compact tappable header is shown
-// instead so the UI never depends on a global input hook.
+// native Steam/Decky `Tabs` component with explicit focus ownership (see the
+// FreeDeck-proven pattern): a scoped root, `autoFocusContents={false}`, and
+// re-focusing the tab row around `onShowTab`.
 
 const PAGE_OCR = "ocr";
 const PAGE_REGIONS = "regions";
+
+interface GamepadTabClassMap {
+  TabsRowScroll?: string;
+  TabRowTabs?: string;
+  Tab?: string;
+  Active?: string;
+  Selected?: string;
+}
+
+function getGamepadTabClassMap(): GamepadTabClassMap | null {
+  const map = (DeckyUiNS as unknown as { gamepadTabbedPageClasses?: GamepadTabClassMap })
+    .gamepadTabbedPageClasses;
+  if (!map || typeof map !== "object") {
+    return null;
+  }
+  return map;
+}
+
+// Disable tab-row transition/scroll animation only inside ClarifyDeck's root so
+// shoulder-button navigation is not destabilized by smooth scrolling.
+const TAB_STABILITY_CSS = `
+  .clarifydeck-qam-root [class*="TabRowTabs"],
+  .clarifydeck-qam-root [class*="TabsRowScroll"],
+  .clarifydeck-qam-root [class*="TabRow"] {
+    transition: none !important;
+    animation: none !important;
+    scroll-behavior: auto !important;
+  }
+  .clarifydeck-qam-root [role="tablist"] {
+    scroll-behavior: auto !important;
+  }
+`;
 
 function OCRPage() {
   return (
@@ -45,16 +78,91 @@ function RegionsPage() {
 
 function Content() {
   const [page, setPage] = useState<string>(PAGE_OCR);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const tabs = useMemo(
+    () => [
+      { id: PAGE_OCR, title: "OCR", content: <OCRPage /> },
+      { id: PAGE_REGIONS, title: "Regions", content: <RegionsPage /> },
+    ],
+    [],
+  );
+
+  // Focus the tab row (or a specific tab) within ClarifyDeck's own root only.
+  const focusTabRow = useCallback(
+    (tabId?: string) => {
+      const classMap = getGamepadTabClassMap();
+      const root = rootRef.current;
+      if (!classMap || !root) {
+        return;
+      }
+      const tabClass = classMap.Tab;
+      if (!tabClass) {
+        return;
+      }
+      let target: HTMLElement | null = null;
+      if (tabId) {
+        const title = String(tabs.find((tab) => tab.id === tabId)?.title ?? "").trim();
+        if (title) {
+          for (const element of Array.from(root.querySelectorAll(`.${tabClass}`))) {
+            const item = element as HTMLElement;
+            if (String(item.textContent ?? "").trim() === title) {
+              target = item;
+              break;
+            }
+          }
+        }
+      }
+      if (!target) {
+        const activeClass = classMap.Active || classMap.Selected;
+        const selector = activeClass ? `.${tabClass}.${activeClass}` : `.${tabClass}`;
+        target = root.querySelector(selector) as HTMLElement | null;
+      }
+      target?.focus?.();
+    },
+    [tabs],
+  );
+
+  const onShowTab = useCallback(
+    (tabId: string) => {
+      focusTabRow();
+      setPage(tabId);
+      window.requestAnimationFrame(() => focusTabRow(tabId));
+    },
+    [focusTabRow],
+  );
+
+  // Give the tab row focus on mount so L1/R1 work immediately.
+  useEffect(() => {
+    const handle = window.requestAnimationFrame(() => focusTabRow());
+    return () => window.cancelAnimationFrame(handle);
+  }, [focusTabRow]);
+
+  // Reset tab-row horizontal scroll after tab changes (stability).
+  useEffect(() => {
+    const classMap = getGamepadTabClassMap();
+    if (!classMap) {
+      return;
+    }
+    const rowClass = classMap.TabsRowScroll || classMap.TabRowTabs;
+    if (!rowClass) {
+      return;
+    }
+    const handle = window.requestAnimationFrame(() => {
+      const row = rootRef.current?.querySelector(`.${rowClass}`) as HTMLElement | null;
+      if (row) {
+        row.style.scrollBehavior = "auto";
+        row.scrollLeft = 0;
+      }
+    });
+    return () => window.cancelAnimationFrame(handle);
+  }, [page]);
+
   if (typeof Tabs === "function") {
     return (
-      <Tabs
-        tabs={[
-          { id: PAGE_OCR, title: "OCR", content: <OCRPage /> },
-          { id: PAGE_REGIONS, title: "Regions", content: <RegionsPage /> },
-        ]}
-        activeTab={page}
-        onShowTab={(id: string) => setPage(id)}
-      />
+      <div ref={rootRef} className="clarifydeck-qam-root" style={qamRootStyle}>
+        <style>{TAB_STABILITY_CSS}</style>
+        <Tabs tabs={tabs} activeTab={page} onShowTab={onShowTab} autoFocusContents={false} />
+      </div>
     );
   }
   return <FallbackPages page={page} onSelect={setPage} />;
@@ -336,6 +444,12 @@ function Overlay() {
     </div>
   );
 }
+
+const qamRootStyle: CSSProperties = {
+  boxSizing: "border-box",
+  overflowX: "hidden",
+  width: "100%",
+};
 
 const pageHeaderStyle: CSSProperties = {
   display: "flex",

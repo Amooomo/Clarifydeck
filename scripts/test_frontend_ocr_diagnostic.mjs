@@ -237,6 +237,96 @@ check("index: authoritative v2 region preview retained", () => {
   assert.ok(indexSrc.includes("qamVisible"));
 });
 
+// -- FreeDeck-style Tabs focus ownership --------------------------------------
+
+check("tabs focus: gamepad tab class map resolved", () => {
+  assert.ok(indexSrc.includes("gamepadTabbedPageClasses"));
+  assert.ok(indexSrc.includes("getGamepadTabClassMap"));
+  assert.ok(indexSrc.includes("interface GamepadTabClassMap"));
+});
+check("tabs focus: autoFocusContents disabled", () => {
+  assert.ok(indexSrc.includes("autoFocusContents={false}"));
+});
+check("tabs focus: scoped root ref", () => {
+  assert.ok(indexSrc.includes("const rootRef = useRef<HTMLDivElement | null>(null)"));
+  assert.ok(indexSrc.includes('className="clarifydeck-qam-root"'));
+  assert.ok(indexSrc.includes("TAB_STABILITY_CSS"));
+});
+check("tabs focus: scoped focus helper", () => {
+  assert.ok(indexSrc.includes("focusTabRow"));
+  assert.ok(indexSrc.includes("root.querySelectorAll"));
+  assert.ok(indexSrc.includes("target?.focus?.()"));
+});
+check("tabs focus: onShowTab refocuses after switch", () => {
+  assert.ok(indexSrc.includes("const onShowTab = useCallback"));
+  assert.ok(indexSrc.includes("focusTabRow();"));
+  assert.ok(indexSrc.includes("setPage(tabId);"));
+  assert.ok(indexSrc.includes("requestAnimationFrame(() => focusTabRow(tabId))"));
+});
+check("tabs focus: no global controller/key listeners", () => {
+  for (const needle of [
+    "window.addEventListener",
+    "document.addEventListener",
+    "keydown",
+    "SteamClient.Input",
+    "GamepadEvent",
+    "navigator.getGamepads",
+  ]) {
+    assert.equal(indexSrc.includes(needle), false, `index contains ${needle}`);
+  }
+});
+
+// -- region draft session lifetime --------------------------------------------
+
+check("session: region draft state round-trips", () => {
+  regionLogic.resetRegionEditorDraftState();
+  assert.equal(regionLogic.getRegionEditorDraftState().active, false);
+  const drafts = [{ region_id: "a", x: 0.5, y: 0.25, w: 0.2, h: 0.2, enabled: true }];
+  regionLogic.rememberRegionEditorDraftState({
+    active: true,
+    activeProfileId: "p1",
+    profiles: [{ profile_id: "p1", label: "Profile 1" }],
+    maxProfiles: 8,
+    configured: true,
+    drafts,
+    styleByRegion: { a: "black_on_white" },
+    fontByRegion: { a: 24 },
+  });
+  const restored = regionLogic.getRegionEditorDraftState();
+  assert.equal(restored.active, true);
+  assert.equal(restored.activeProfileId, "p1");
+  assert.equal(restored.drafts[0].x, 0.5);
+  assert.equal(restored.drafts[0].y, 0.25);
+  assert.equal(restored.styleByRegion.a, "black_on_white");
+  assert.equal(restored.fontByRegion.a, 24);
+});
+check("session: region draft state resets on close", () => {
+  regionLogic.rememberRegionEditorDraftState({
+    active: true,
+    activeProfileId: "p1",
+    profiles: [],
+    maxProfiles: 8,
+    configured: true,
+    drafts: [{ region_id: "a", x: 0.1, y: 0.1, w: 0.2, h: 0.2, enabled: true }],
+    styleByRegion: {},
+    fontByRegion: {},
+  });
+  regionLogic.resetRegionEditorDraftState();
+  const reset = regionLogic.getRegionEditorDraftState();
+  assert.equal(reset.active, false);
+  assert.deepEqual(reset.drafts, []);
+  assert.equal(reset.activeProfileId, null);
+});
+check("session: region editor hydrates and persists draft state", () => {
+  assert.ok(regionComponentSrc.includes("getRegionEditorDraftState()"));
+  assert.ok(regionComponentSrc.includes("rememberRegionEditorDraftState("));
+  assert.ok(regionComponentSrc.includes("resetRegionEditorDraftState()"));
+  assert.ok(regionComponentSrc.includes("const resume = initialDraft.active"));
+});
+check("session: resume skips the initial backend reload", () => {
+  assert.ok(regionComponentSrc.includes("if (!resume)"));
+});
+
 // -- legacy / diagnostic UI removed -------------------------------------------
 
 check("legacy: removed headings/actions absent", () => {

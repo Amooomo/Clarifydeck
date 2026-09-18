@@ -2408,6 +2408,28 @@ Status: LOCAL PASS / DEVICE TEST PENDING
   packaging-allowlist changes.
 - harness updated to the production UI (`scripts/test_frontend_ocr_diagnostic.mjs`).
 
+## Phase 2P.1B — QAM tab focus + region draft lifetime
+
+Status: LOCAL PASS / DEVICE TEST PENDING
+
+- L1/R1 navigation now uses the FreeDeck-proven focus ownership pattern: a
+  scoped `.clarifydeck-qam-root` root, `autoFocusContents={false}` on the native
+  `Tabs`, `gamepadTabbedPageClasses` lookup, and `onShowTab` = focus current tab
+  row -> set the requested active tab -> `requestAnimationFrame` re-focus the new
+  tab. Tab-row scroll/animation is disabled only inside the ClarifyDeck root. No
+  global key/controller listeners were added.
+- Dropdown stay-on-page: after a tab change the active tab is explicitly focused,
+  so a Dropdown menu close restoring focus to the tab row no longer resets the
+  active tab to OCR. `activeTab` remains the authoritative React state.
+- Region draft lifetime: `src/regionEditor.ts` gained a module-level
+  `RegionEditorDraftState` session (profiles, active profile, drafts/geometry,
+  enabled/primary order, appearance maps). The Region editor hydrates from it on
+  remount, skips the backend reload while a live session exists, and persists on
+  every change; it resets on a genuine QAM close. `Save Changes` remains the only
+  backend write; no localStorage/persistence was added and no backend changed.
+- no backend, capture, OCR, stabilizer, Fast Accept, renderer, transport or
+  packaging changes; `@decky/ui` stays at 4.12.1.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

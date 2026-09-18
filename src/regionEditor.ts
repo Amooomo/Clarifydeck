@@ -323,6 +323,51 @@ export function resetRegionEditorSession(): void {
   editorSession = { selectedId: null, previewOn: false };
 }
 
+// -- Phase 2P.1B region editor draft session (tab-switch lifetime) -------------
+// The Region editor unmounts while the OCR page is active, so its React state
+// would be lost on OCR <-> Regions switching. This module-level session keeps
+// the in-progress editor state alive for the duration of one open QAM. It is
+// NOT persistence: it resets when the QAM genuinely closes, and `Save Changes`
+// remains the only backend write.
+
+export type RegionEditorProfileInfo = { profile_id: string; label: string };
+
+export type RegionEditorDraftState = {
+  active: boolean;
+  activeProfileId: string | null;
+  profiles: RegionEditorProfileInfo[];
+  maxProfiles: number;
+  configured: boolean;
+  drafts: RegionDraft[];
+  styleByRegion: Record<string, string>;
+  fontByRegion: Record<string, number>;
+};
+
+const EMPTY_DRAFT_STATE: RegionEditorDraftState = {
+  active: false,
+  activeProfileId: null,
+  profiles: [],
+  maxProfiles: 8,
+  configured: false,
+  drafts: [],
+  styleByRegion: {},
+  fontByRegion: {},
+};
+
+let draftState: RegionEditorDraftState = { ...EMPTY_DRAFT_STATE };
+
+export function getRegionEditorDraftState(): RegionEditorDraftState {
+  return draftState;
+}
+
+export function rememberRegionEditorDraftState(state: RegionEditorDraftState): void {
+  draftState = state;
+}
+
+export function resetRegionEditorDraftState(): void {
+  draftState = { ...EMPTY_DRAFT_STATE };
+}
+
 // Accept both a Decky Dropdown option object ({ data }) and a raw value.
 export function dropdownOptionValue(option: unknown): string | null {
   if (typeof option === "string") {
