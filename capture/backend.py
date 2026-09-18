@@ -163,6 +163,10 @@ class PipeWireCaptureBackend:
                 if self._stop_requested:
                     self._state = "STOPPED"
                     raise CaptureError("pipewire_start_cancelled", "stop requested during startup") from exc
+                self._log(
+                    f"[capture-pipewire] start attempt={self._stats.attempts} failed "
+                    f"error={self._stats.last_error}"
+                )
                 if self._clock() >= deadline:
                     self._state = "FAILED"
                     self._log(
@@ -218,6 +222,7 @@ class PipeWireCaptureBackend:
             self._state = "FAILED"
             self._stats.pull_errors += 1
             self._stats.last_error = error
+            self._log(f"[capture-pipewire] stream error={error}")
             raise CaptureError("pipewire_stream_error", error)
 
         pull_started = self._clock()
@@ -229,9 +234,11 @@ class PipeWireCaptureBackend:
                 self._state = "FAILED"
                 self._stats.pull_errors += 1
                 self._stats.last_error = error
+                self._log(f"[capture-pipewire] stream error={error}")
                 raise CaptureError("pipewire_stream_error", error)
             self._stats.pull_errors += 1
             self._stats.last_pull_ms = pull_ms
+            self._log(f"[capture-pipewire] no frame within {timeout}s pull_ms={pull_ms}")
             raise CaptureError("pipewire_no_frame", f"no sample within {timeout}s")
 
         self._sequence += 1

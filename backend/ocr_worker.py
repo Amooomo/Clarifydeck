@@ -436,9 +436,16 @@ class OCRWorkerManager:
                 line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
                 if line:
                     self._stderr_tail.append(line)
-                    # Phase 2N.3/2N.4/2N.5A: mirror changed-text diagnostics to the
-                    # plugin journal so device traces are collectible.
-                    if "[latency]" in line or "[stabilizer-audit" in line or "[fast-accept" in line:
+                    # Phase 2N.3/2N.4/2N.5A/2N.6.1: mirror changed-text and capture
+                    # backend diagnostics to the plugin journal so device traces are
+                    # collectible.
+                    if (
+                        "[latency]" in line
+                        or "[stabilizer-audit" in line
+                        or "[fast-accept" in line
+                        or "[capture-pipewire" in line
+                        or "[capture-backend" in line
+                    ):
                         self._log(line)
         except Exception:
             pass

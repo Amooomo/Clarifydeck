@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import builtins
 import sys
+import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -346,6 +347,152 @@ class _AdapterHarness(pw.GstPipeWireAdapter):
         )
 
 
+class _FakeBus:
+    def __init__(self, messages=None):
+        self._messages = list(messages or [])
+
+    def pop_filtered(self, _mask):
+        return self._messages.pop(0) if self._messages else None
+
+
+class _FakeAppsink:
+    def __init__(self, sample):
+        self._sample = sample
+        self.pulls = 0
+
+    def try_pull_sample(self, timeout_ns):
+        self.pulls += 1
+        return self._sample
+
+
+class _NoPullAppsink:
+    """Mimics a PyGObject appsink when the GstApp override is not loaded."""
+
+
+class _FakePipeline:
+    def __init__(self, appsink, bus):
+        self._appsink = appsink
+        self._bus = bus
+        self.states = []
+
+    def get_by_name(self, _name):
+        return self._appsink
+
+    def get_bus(self):
+        return self._bus
+
+    def set_state(self, state):
+        self.states.append(state)
+
+
+class _FakeGst:
+    class State:
+        PLAYING = "PLAYING"
+        NULL = "NULL"
+
+    class MessageType:
+        ERROR = 1
+        EOS = 2
+
+    class MapFlags:
+        READ = 1
+
+    CLOCK_TIME_NONE = (1 << 64) - 1
+
+    def __init__(self, pipeline):
+        self._pipeline = pipeline
+        self._initialized = True
+        self.descriptions = []
+
+    def is_initialized(self):
+        return self._initialized
+
+    def init(self, _argv):
+        self._initialized = True
+
+    def parse_launch(self, description):
+        self.descriptions.append(description)
+        return self._pipeline
+
+
+class GstAppNamespaceTest(unittest.TestCase):
+    def _install_fake_gi(self, gst, gstapp=None):
+        fake_gi = types.ModuleType("gi")
+        calls: list = []
+
+        def require_version(name, version):
+            calls.append((name, version))
+
+        fake_gi.require_version = require_version
+        fake_repo = types.ModuleType("gi.repository")
+        fake_repo.Gst = gst
+        fake_repo.GstVideo = SimpleNamespace()
+        fake_repo.GstApp = gstapp if gstapp is not None else SimpleNamespace()
+        fake_gi.repository = fake_repo
+
+        previous = {key: sys.modules.get(key) for key in ("gi", "gi.repository")}
+        sys.modules["gi"] = fake_gi
+        sys.modules["gi.repository"] = fake_repo
+
+        def cleanup():
+            for key, value in previous.items():
+                if value is None:
+                    sys.modules.pop(key, None)
+                else:
+                    sys.modules[key] = value
+
+        self.addCleanup(cleanup)
+        return calls
+
+    def test_load_gst_requires_and_returns_gstapp(self) -> None:
+        gst = _FakeGst(_FakePipeline(_NoPullAppsink(), _FakeBus()))
+        gstapp = SimpleNamespace()
+        calls = self._install_fake_gi(gst, gstapp=gstapp)
+        result = pw.load_gst()
+        self.assertEqual(len(result), 3)
+        self.assertIs(result[0], gst)
+        self.assertIs(result[2], gstapp)
+        self.assertIn(("Gst", "1.0"), calls)
+        self.assertIn(("GstVideo", "1.0"), calls)
+        self.assertIn(("GstApp", "1.0"), calls)
+
+    def test_start_attempt_uses_appsink_pull_and_stores_gstapp(self) -> None:
+        caps = FakeCaps({"width": 2, "height": 2, "format": "NV12"})
+        buffer = FakeBuffer(bytes([16, 16, 16, 16, 128, 128]))
+        sample = FakeSample(caps, buffer)
+        appsink = _FakeAppsink(sample)
+        pipeline = _FakePipeline(appsink, _FakeBus())
+        gst = _FakeGst(pipeline)
+        gstapp = SimpleNamespace()
+        self._install_fake_gi(gst, gstapp=gstapp)
+        adapter = pw.GstPipeWireAdapter()
+        info = adapter.start_attempt()
+        self.assertEqual(info["state"], "PLAYING")
+        self.assertIs(adapter._GstApp, gstapp)
+        self.assertEqual(appsink.pulls, 1)
+        self.assertEqual(info["source_width"], 2)
+        self.assertEqual(info["source_height"], 2)
+        self.assertIn("target-object=gamescope", gst.descriptions[0])
+
+    def test_appsink_without_pull_method_fails_cleanly(self) -> None:
+        pipeline = _FakePipeline(_NoPullAppsink(), _FakeBus())
+        gst = _FakeGst(pipeline)
+        self._install_fake_gi(gst)
+        adapter = pw.GstPipeWireAdapter()
+        with self.assertRaises(CaptureError) as ctx:
+            adapter.start_attempt()
+        self.assertEqual(ctx.exception.code, "pipewire_appsink_unavailable")
+
+    def test_backend_logs_start_failure_diagnostic(self) -> None:
+        logs: list = []
+        adapter = FakeAdapter(fail_attempts=999)
+        backend = PipeWireCaptureBackend(adapter=adapter, retry_window=0.0, logger=logs.append)
+        with self.assertRaises(CaptureError):
+            backend.start()
+        self.assertTrue(any("[capture-pipewire]" in line and "start" in line for line in logs))
+        self.assertTrue(any("pipewire_start_failed" in line for line in logs))
+
+
 class Nv12ConversionTest(unittest.TestCase):
     def test_tightly_packed_black_and_white(self) -> None:
         black = bytes([16, 16, 16, 16, 128, 128])
@@ -488,6 +635,51 @@ class WorkerCommandForwardingTest(unittest.TestCase):
         self.assertEqual(OCRWorkerManager._resolve_capture_backend("pipewire"), "pipewire")
         self.assertEqual(OCRWorkerManager._resolve_capture_backend("screenshot"), "screenshot")
         self.assertIsNone(OCRWorkerManager._resolve_capture_backend("bogus"))
+
+
+class ManagerJournalMirrorTest(unittest.TestCase):
+    def test_capture_backend_lines_are_mirrored(self) -> None:
+        from backend.ocr_worker import OCRWorkerManager
+
+        class _Stream:
+            def __init__(self, lines):
+                self._lines = list(lines)
+
+            def readline(self, limit=-1):
+                return self._lines.pop(0) if self._lines else b""
+
+            def close(self):
+                pass
+
+        captured: list = []
+        manager = OCRWorkerManager(logger=captured.append)
+        manager._proc = SimpleNamespace(
+            stderr=_Stream(
+                [
+                    b"[capture-pipewire] backend=pipewire target=gamescope state=PLAYING\n",
+                    b"[capture-backend] error backend=pipewire code=pipewire_unavailable detail=x\n",
+                    b"unrelated line\n",
+                ]
+            )
+        )
+        manager._read_stderr()
+        self.assertTrue(any("[capture-pipewire]" in line for line in captured))
+        self.assertTrue(any("[capture-backend]" in line for line in captured))
+        self.assertFalse(any("unrelated line" in line for line in captured))
+
+
+class ImportSafetyTest(unittest.TestCase):
+    def test_capture_modules_do_not_load_gi(self) -> None:
+        import importlib
+
+        for name in (
+            "capture.frame",
+            "capture.change_detector",
+            "capture.pipewire_capture",
+            "capture.backend",
+        ):
+            importlib.import_module(name)
+        self.assertNotIn("gi", sys.modules)
 
 
 if __name__ == "__main__":

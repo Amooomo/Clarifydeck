@@ -622,6 +622,15 @@ class OCRDiagnostic:
         except asyncio.CancelledError:
             self._interrupted = True
             raise
+        except CaptureError as exc:
+            # Phase 2N.6.1: narrow startup/failure diagnostic (no transport change).
+            print(
+                f"[capture-backend] error backend={getattr(capture, 'name', 'unknown')} "
+                f"code={exc.code} detail={exc}",
+                flush=True,
+            )
+            self.state = OCRState.FAILED
+            return 1
         except Exception as exc:
             print(f"[ocr] unexpected_error error={type(exc).__name__} detail={exc}", flush=True)
             self.state = OCRState.FAILED

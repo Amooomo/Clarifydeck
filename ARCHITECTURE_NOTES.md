@@ -2252,6 +2252,25 @@ Prototype architecture:
   Gamescope X11 property changes, Change Gate + PipeWire combination, OCR/FPS
   tuning, and removing the screenshot backend.
 
+## Phase 2N.6.1 — GstApp namespace hotfix
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+- confirmed device root cause: `GstApp` was not imported, so the PyGObject
+  appsink override was absent and `appsink.try_pull_sample` did not exist
+  (`AttributeError` -> `CaptureError("pipewire_start_failed")` -> worker exit 1).
+- `load_gst()` now requires and imports `GstApp` (`gi.require_version("GstApp",
+  "1.0")`, `from gi.repository import Gst, GstVideo, GstApp`) before
+  `Gst.parse_launch`, and returns the `GstApp` namespace; the adapter stores it
+  (`_GstApp`). Imports remain lazy (no top-level `gi`/`Gst`/`GstApp`/`GstVideo`).
+- an explicit `pipewire_appsink_unavailable` error is raised if a created
+  appsink still lacks `try_pull_sample`; startup failures now log
+  `[capture-pipewire] start attempt=… failed error=…` / `start failed …`, and
+  the worker prints `[capture-backend] error backend=… code=… detail=…`.
+  `[capture-pipewire]` / `[capture-backend]` lines are mirrored to the plugin
+  journal.
+- no architecture/OCR/Fast-Accept/renderer/UI/default-backend changes.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

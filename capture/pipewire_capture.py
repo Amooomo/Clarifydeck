@@ -49,17 +49,23 @@ class PipeWireFrame:
 
 
 def load_gst():
-    """Lazily import PyGObject/GStreamer; never executed at module import."""
+    """Lazily import PyGObject/GStreamer; never executed at module import.
+
+    ``GstApp`` MUST be required/imported before ``Gst.parse_launch`` creates an
+    appsink: without the GstApp namespace the PyGObject override is not
+    installed and the appsink lacks ``try_pull_sample``.
+    """
     try:
         import gi  # noqa: F401  (intentional lazy import)
 
         gi.require_version("Gst", "1.0")
         gi.require_version("GstVideo", "1.0")
-        from gi.repository import Gst, GstVideo  # noqa: WPS433
+        gi.require_version("GstApp", "1.0")
+        from gi.repository import Gst, GstVideo, GstApp  # noqa: WPS433
 
         if not Gst.is_initialized():
             Gst.init(None)
-        return Gst, GstVideo
+        return Gst, GstVideo, GstApp
     except Exception as exc:  # missing gi / typelib / Gst
         raise CaptureError("pipewire_unavailable", f"{type(exc).__name__}: {exc}") from exc
 
@@ -207,6 +213,7 @@ class GstPipeWireAdapter:
         self._first_sample_timeout = float(first_sample_timeout)
         self._Gst = None
         self._GstVideo = None
+        self._GstApp = None
         self._pipeline = None
         self._appsink = None
         self._bus = None
@@ -234,9 +241,12 @@ class GstPipeWireAdapter:
     def start_attempt(self) -> dict:
         """Build one pipeline and wait for the first sample (single attempt)."""
         self._teardown()
-        Gst, GstVideo = load_gst()
+        # GstApp is imported before parse_launch so the appsink override (and its
+        # try_pull_sample method) is installed on the created element.
+        Gst, GstVideo, GstApp = load_gst()
         self._Gst = Gst
         self._GstVideo = GstVideo
+        self._GstApp = GstApp
         started = self._clock()
         try:
             pipeline = Gst.parse_launch(self.pipeline_description())
@@ -246,6 +256,14 @@ class GstPipeWireAdapter:
         if appsink is None:
             self._set_null(pipeline)
             raise CaptureError("pipewire_pipeline_error", "appsink missing")
+        if not hasattr(appsink, "try_pull_sample"):
+            # Confirmed device failure mode: GstApp namespace not loaded, so the
+            # PyGObject appsink override (and its pull method) is absent.
+            self._set_null(pipeline)
+            raise CaptureError(
+                "pipewire_appsink_unavailable",
+                f"appsink type={type(appsink).__name__} has no try_pull_sample (GstApp override missing)",
+            )
         self._pipeline = pipeline
         self._appsink = appsink
         self._bus = pipeline.get_bus()
