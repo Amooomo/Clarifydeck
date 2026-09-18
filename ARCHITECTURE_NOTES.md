@@ -2507,6 +2507,34 @@ Status: LOCAL PASS / DEVICE TEST PENDING
   follow-selection guards. Shoulder navigation, Region draft semantics and all
   backend/runtime invariants are unchanged.
 
+## Phase 2P.1H — Profile selection synchronization
+
+Status: LOCAL PASS / DEVICE TEST PENDING
+
+- verified cause: `selectProfile` updated the controlled `activeProfileId` only
+  after the async `region_profile_select` RPC resolved. A Dropdown context menu
+  can transiently remount `RegionEditorSection` during that RPC; the remount
+  re-hydrated `activeProfileId` from the module `RegionEditorDraftState`, which
+  still held the previous profile, so the new instance rendered the stale
+  profile while the backend had already switched. The later `-` delete appeared
+  to "fix" it because deleting the stale profile made the backend's fallback
+  (`region_profile_select` had already changed the active profile) surface.
+- fix: the requested profile is now made authoritative **synchronously** before
+  the RPC — `selectProfile` sets React `activeProfileId` and
+  `rememberActiveProfileId` in the module session (and the `activeProfileIdRef`)
+  first, then calls the RPC. The controlled Dropdown and the session therefore
+  agree even if the editor remounts mid-RPC. A failed selection resyncs from the
+  backend via `load()`.
+- region context: `RegionEditorDraftState` gained `draftsProfileId` (the profile
+  the drafts belong to). `applyPayload` records it; on a resumed mount, if
+  `draftsProfileId !== activeProfileId` the editor reloads the active regions so
+  the Region dropdown matches the new profile.
+- `+`/`-` continue to use the backend's returned `active_profile_id` (add selects
+  the new profile; delete falls back to a valid profile) and now also sync the
+  authoritative ref. Profile operations never change the page or the preview.
+- no QAM lifecycle, navigation, Preview ownership, Panel Opacity or
+  backend/runtime changes.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

@@ -29,6 +29,8 @@ import {
   primaryRegionId,
   regionLabel,
   regionPreviewPayload,
+  rememberActiveProfileId,
+  rememberDraftsProfileId,
   rememberRegionEditorDraftState,
   rememberRegionPreview,
   rememberRegionSelection,
@@ -124,6 +126,9 @@ export function RegionEditorSection() {
   const [activeProfileId, setActiveProfileId] = useState<string | null>(
     () => (resume ? initialDraft.activeProfileId : null),
   );
+  const [draftsProfileId, setDraftsProfileId] = useState<string | null>(
+    () => (resume ? initialDraft.draftsProfileId : null),
+  );
   const [maxProfiles, setMaxProfiles] = useState(() => (resume ? initialDraft.maxProfiles : 8));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -138,6 +143,7 @@ export function RegionEditorSection() {
   );
   const mounted = useRef(true);
   const selectedIdRef = useRef<string | null>(selectedId);
+  const activeProfileIdRef = useRef<string | null>(resume ? initialDraft.activeProfileId : null);
 
   const selectRegion = (regionId: string | null) => {
     selectedIdRef.current = regionId;
@@ -156,6 +162,9 @@ export function RegionEditorSection() {
     setConfigured(configuredNow);
     const source = configuredNow ? result.configured_regions ?? [] : result.effective_regions ?? [];
     setDrafts(source.map((region) => ({ ...region })));
+    const profile = activeProfileIdRef.current;
+    setDraftsProfileId(profile);
+    rememberDraftsProfileId(profile);
     const current = selectedIdRef.current;
     const next =
       current && source.some((region) => region.region_id === current)
@@ -166,7 +175,9 @@ export function RegionEditorSection() {
 
   const applyProfilesPayload = (result: RegionProfilesPayload) => {
     setProfiles(result.profiles ?? []);
-    setActiveProfileId(result.active_profile_id ?? null);
+    const nextProfile = result.active_profile_id ?? null;
+    activeProfileIdRef.current = nextProfile;
+    setActiveProfileId(nextProfile);
     if (typeof result.max_profiles === "number") {
       setMaxProfiles(result.max_profiles);
     }
@@ -210,6 +221,11 @@ export function RegionEditorSection() {
     mounted.current = true;
     if (!resume) {
       void load();
+    } else if (initialDraft.draftsProfileId !== initialDraft.activeProfileId) {
+      // A transient remount happened during a profile switch: the session holds
+      // the requested active profile, but `drafts` may still belong to the old
+      // profile. Refresh the regions for the authoritative profile.
+      void loadActiveRegions();
     }
     return () => {
       mounted.current = false;
@@ -224,6 +240,7 @@ export function RegionEditorSection() {
     rememberRegionEditorDraftState({
       active: true,
       activeProfileId,
+      draftsProfileId,
       profiles,
       maxProfiles,
       configured,
@@ -231,7 +248,16 @@ export function RegionEditorSection() {
       styleByRegion,
       fontByRegion,
     });
-  }, [activeProfileId, profiles, maxProfiles, configured, drafts, styleByRegion, fontByRegion]);
+  }, [
+    activeProfileId,
+    draftsProfileId,
+    profiles,
+    maxProfiles,
+    configured,
+    drafts,
+    styleByRegion,
+    fontByRegion,
+  ]);
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
@@ -394,18 +420,28 @@ export function RegionEditorSection() {
     if (!profileId || profileId === activeProfileId) {
       return;
     }
+    // Synchronously make the requested profile authoritative in React state and
+    // the module session. This keeps the controlled Dropdown value and the
+    // session in agreement even if a Dropdown context menu transiently remounts
+    // the editor while the async RPC is in flight.
+    activeProfileIdRef.current = profileId;
+    setActiveProfileId(profileId);
+    rememberActiveProfileId(profileId);
     setBusy(true);
     setError("");
     try {
       const result = await regionProfileSelect(profileId);
-      if (mounted.current) {
-        if (result.ok === false) {
-          setError(result.detail || result.error || "Select Region Set failed");
-        } else {
-          applyProfilesPayload(result);
-          await loadActiveRegions();
-        }
+      if (!mounted.current) {
+        return;
       }
+      if (result.ok === false) {
+        setError(result.detail || result.error || "Select Region Set failed");
+        // Resync the authoritative profile from the backend after a failed switch.
+        await load();
+        return;
+      }
+      applyProfilesPayload(result);
+      await loadActiveRegions();
     } catch (err) {
       if (mounted.current) {
         setError(`Select Region Set failed: ${String(err)}`);

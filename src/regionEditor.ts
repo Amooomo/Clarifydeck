@@ -335,6 +335,10 @@ export type RegionEditorProfileInfo = { profile_id: string; label: string };
 export type RegionEditorDraftState = {
   active: boolean;
   activeProfileId: string | null;
+  // Which profile the current `drafts` belong to. Used to detect a profile
+  // change across a transient remount (e.g. a Dropdown context menu) and reload
+  // the correct regions instead of showing the previous profile's drafts.
+  draftsProfileId: string | null;
   profiles: RegionEditorProfileInfo[];
   maxProfiles: number;
   configured: boolean;
@@ -346,6 +350,7 @@ export type RegionEditorDraftState = {
 const EMPTY_DRAFT_STATE: RegionEditorDraftState = {
   active: false,
   activeProfileId: null,
+  draftsProfileId: null,
   profiles: [],
   maxProfiles: 8,
   configured: false,
@@ -362,6 +367,17 @@ export function getRegionEditorDraftState(): RegionEditorDraftState {
 
 export function rememberRegionEditorDraftState(state: RegionEditorDraftState): void {
   draftState = state;
+}
+
+// Synchronous authoritative profile selection. Called before the async profile
+// RPC so a transient remount during the switch re-hydrates the requested profile
+// rather than the previous one.
+export function rememberActiveProfileId(profileId: string | null): void {
+  draftState = { ...draftState, activeProfileId: profileId };
+}
+
+export function rememberDraftsProfileId(profileId: string | null): void {
+  draftState = { ...draftState, draftsProfileId: profileId };
 }
 
 export function resetRegionEditorDraftState(): void {

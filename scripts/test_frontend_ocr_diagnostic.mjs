@@ -441,6 +441,87 @@ check("session: resume skips the initial backend reload", () => {
   assert.ok(regionComponentSrc.includes("if (!resume)"));
 });
 
+// -- Phase 2P.1H profile selection synchronization ----------------------------
+
+check("profile: synchronous authoritative selection helpers", () => {
+  // The session exposes synchronous profile-selection updates.
+  regionLogic.resetRegionEditorDraftState();
+  regionLogic.rememberActiveProfileId("p1");
+  assert.equal(regionLogic.getRegionEditorDraftState().activeProfileId, "p1");
+  regionLogic.rememberDraftsProfileId("p1");
+  assert.equal(regionLogic.getRegionEditorDraftState().draftsProfileId, "p1");
+  regionLogic.resetRegionEditorDraftState();
+  assert.equal(regionLogic.getRegionEditorDraftState().activeProfileId, null);
+  assert.equal(regionLogic.getRegionEditorDraftState().draftsProfileId, null);
+});
+check("profile: select synchronously sets active profile + session", () => {
+  const body = regionComponentSrc.slice(
+    regionComponentSrc.indexOf("const selectProfile"),
+    regionComponentSrc.indexOf("const addProfile"),
+  );
+  // Controlled Dropdown prop and the module session are updated before the RPC.
+  assert.ok(body.includes("setActiveProfileId(profileId)"));
+  assert.ok(body.includes("rememberActiveProfileId(profileId)"));
+  const setIndex = body.indexOf("setActiveProfileId(profileId)");
+  const rpcIndex = body.indexOf("regionProfileSelect(profileId)");
+  assert.ok(setIndex >= 0 && rpcIndex > setIndex, "selection must precede the async RPC");
+});
+check("profile: stale controlled-state regression guard", () => {
+  // Simulate: P1 -> + -> P2 -> + -> P3, then select P1.
+  regionLogic.resetRegionEditorDraftState();
+  regionLogic.rememberRegionEditorDraftState({
+    active: true,
+    activeProfileId: "p3",
+    draftsProfileId: "p3",
+    profiles: [
+      { profile_id: "p1", label: "Profile 1" },
+      { profile_id: "p2", label: "Profile 2" },
+      { profile_id: "p3", label: "Profile 3" },
+    ],
+    maxProfiles: 8,
+    configured: true,
+    drafts: [{ region_id: "r3", x: 0.1, y: 0.1, w: 0.2, h: 0.2, enabled: true }],
+    styleByRegion: {},
+    fontByRegion: {},
+  });
+  // User selects Profile 1 (synchronous session update, as selectProfile does).
+  regionLogic.rememberActiveProfileId("p1");
+  const state = regionLogic.getRegionEditorDraftState();
+  assert.equal(state.activeProfileId, "p1");
+  assert.notEqual(state.activeProfileId, "p3");
+  // The drafts still belong to P3 until the regions reload completes.
+  assert.equal(state.draftsProfileId, "p3");
+  assert.notEqual(state.draftsProfileId, state.activeProfileId);
+  regionLogic.resetRegionEditorDraftState();
+});
+check("profile: remount reloads regions when drafts profile is stale", () => {
+  assert.ok(regionComponentSrc.includes("initialDraft.draftsProfileId !== initialDraft.activeProfileId"));
+  assert.ok(regionComponentSrc.includes("void loadActiveRegions()"));
+});
+check("profile: add/delete sync the authoritative ref", () => {
+  assert.ok(regionComponentSrc.includes("activeProfileIdRef.current = nextProfile"));
+  assert.ok(regionComponentSrc.includes("setActiveProfileId(nextProfile)"));
+});
+check("profile: selection failure resyncs from backend", () => {
+  const body = regionComponentSrc.slice(
+    regionComponentSrc.indexOf("const selectProfile"),
+    regionComponentSrc.indexOf("const addProfile"),
+  );
+  assert.ok(body.includes("await load()"));
+});
+check("profile: operations never change the page", () => {
+  for (const needle of ["setActiveId", "goToPage", "goPreviousPage", "goNextPage", "rememberQamPageSession"]) {
+    assert.equal(regionComponentSrc.includes(needle), false, needle);
+  }
+});
+check("profile: selection does not toggle preview", () => {
+  const body = regionComponentSrc.slice(
+    regionComponentSrc.indexOf("const selectProfile"),
+    regionComponentSrc.indexOf("const addProfile"),
+  );
+  assert.equal(body.includes("setPreviewOn"), false);
+});
+
 // -- legacy / diagnostic UI removed -------------------------------------------
 
 check("legacy: removed headings/actions absent", () => {
