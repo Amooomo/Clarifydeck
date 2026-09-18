@@ -41,7 +41,6 @@ const PAGES: QamPage[] = [
   { id: "ocr", title: "OCR" },
   { id: "regions", title: "Regions" },
 ];
-const PAGE_OCR = PAGES[0].id;
 
 function OCRPage() {
   return (
@@ -83,11 +82,9 @@ function PageHeader({
 }
 
 function Content() {
-  // Active page is session-backed so it survives transient remounts within one
-  // open QAM (e.g. Dropdown context menus), while a genuine QAM close resets it
-  // to OCR. Mirrors the Region editor draft-session lifetime.
-  const qamVisible = useQuickAccessVisible();
-  const prevQamVisible = useRef(qamVisible);
+  // Active page is session-backed so it survives transient remounts. The page
+  // changes ONLY on an explicit navigation action (header click / L1 / R1).
+  // Dropdown/context-menu/visibility/focus/remount events never change it.
   const [activeId, setActiveId] = useState<string>(() =>
     resolveSessionPageId(PAGES, getQamPageSession()),
   );
@@ -95,16 +92,6 @@ function Content() {
   useEffect(() => {
     rememberQamPageSession(activeId);
   }, [activeId]);
-
-  useEffect(() => {
-    const wasVisible = prevQamVisible.current;
-    prevQamVisible.current = qamVisible;
-    if (wasVisible && !qamVisible) {
-      // Genuine QAM close: next open starts on OCR again.
-      resetQamPageSession();
-      setActiveId(PAGE_OCR);
-    }
-  }, [qamVisible]);
 
   const goToPage = useCallback((id: string) => {
     setActiveId((current) => (PAGES.some((page) => page.id === id) ? id : current));

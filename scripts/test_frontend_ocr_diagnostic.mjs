@@ -357,8 +357,24 @@ check("page session: index content is session-backed", () => {
   assert.ok(indexSrc.includes("resolveSessionPageId(PAGES, getQamPageSession())"));
   assert.ok(indexSrc.includes("rememberQamPageSession(activeId)"));
   assert.ok(indexSrc.includes("resetQamPageSession()"));
-  assert.ok(indexSrc.includes("wasVisible && !qamVisible"));
-  assert.ok(indexSrc.includes("resetQamPageSession();") && indexSrc.includes("setActiveId(PAGE_OCR)"));
+});
+check("page: no QAM-visibility-driven page reset", () => {
+  // The Decky visibility signal blips during context-menu/preview activity; it
+  // must never reset the active page.
+  assert.equal(indexSrc.includes("wasVisible && !qamVisible"), false);
+  assert.equal(indexSrc.includes("setActiveId(PAGE_OCR)"), false);
+});
+check("page: only explicit navigation changes the page", () => {
+  // setActiveId is used only by goToPage / goPreviousPage / goNextPage.
+  assert.equal(countOccurrences(indexSrc, "setActiveId("), 3);
+  assert.ok(indexSrc.includes("onSelect={goToPage}"));
+  assert.ok(indexSrc.includes("GamepadButton.BUMPER_LEFT"));
+  assert.ok(indexSrc.includes("GamepadButton.BUMPER_RIGHT"));
+});
+check("page: preview/region editor never touch the active page", () => {
+  for (const needle of ["setActiveId", "goToPage", "goPreviousPage", "goNextPage", "rememberQamPageSession"]) {
+    assert.equal(regionComponentSrc.includes(needle), false, `region editor contains ${needle}`);
+  }
 });
 check("page session: reset on plugin dismount", () => {
   const dismount = indexSrc.slice(indexSrc.indexOf("onDismount()"));
@@ -414,8 +430,12 @@ check("session: region draft state resets on close", () => {
 check("session: region editor hydrates and persists draft state", () => {
   assert.ok(regionComponentSrc.includes("getRegionEditorDraftState()"));
   assert.ok(regionComponentSrc.includes("rememberRegionEditorDraftState("));
-  assert.ok(regionComponentSrc.includes("resetRegionEditorDraftState()"));
   assert.ok(regionComponentSrc.includes("const resume = initialDraft.active"));
+});
+check("session: region editor never clears drafts on visibility/unmount", () => {
+  assert.equal(regionComponentSrc.includes("resetRegionEditorDraftState"), false);
+  assert.equal(regionComponentSrc.includes("resetRegionEditorSession"), false);
+  assert.equal(regionComponentSrc.includes("useQuickAccessVisible"), false);
 });
 check("session: resume skips the initial backend reload", () => {
   assert.ok(regionComponentSrc.includes("if (!resume)"));
@@ -726,16 +746,49 @@ check("preview: store has no backend writes", () => {
   const source = fs.readFileSync(REGION_LOGIC, "utf8");
   assert.equal(/callable|region_config_set|fetch\(/.test(source), false);
 });
-check("preview: component syncs store and clears on unmount", () => {
+check("preview: component syncs store; explicit Show/Hide only", () => {
   assert.ok(regionComponentSrc.includes("setRegionPreview("));
-  assert.ok(regionComponentSrc.includes("clearRegionPreview("));
   assert.ok(regionComponentSrc.includes("setRegionPreviewEnabled(previewOn)"));
   assert.ok(regionComponentSrc.includes("setRegionPreviewRegions("));
-  assert.ok(regionComponentSrc.includes("clearRegionPreviewRegions()"));
+  // No visibility/unmount-driven preview teardown (that caused device resets).
+  assert.equal(regionComponentSrc.includes("clearRegionPreview("), false);
+  assert.equal(regionComponentSrc.includes("clearRegionPreviewRegions"), false);
+  assert.equal(regionComponentSrc.includes("useQuickAccessVisible"), false);
 });
-check("preview: reloads persisted config when QAM opens", () =>
-  assert.ok(regionComponentSrc.includes("useQuickAccessVisible")),
-);
+check("preview: state is session-backed (survives remount)", () => {
+  assert.ok(regionComponentSrc.includes("getRegionEditorSession().previewOn"));
+  assert.ok(regionComponentSrc.includes("rememberRegionPreview(previewOn)"));
+});
+check("preview: explicit Show/Hide updates the session", () => {
+  r.resetRegionEditorSession();
+  assert.equal(r.getRegionEditorSession().previewOn, false);
+  r.rememberRegionPreview(true);
+  assert.equal(r.getRegionEditorSession().previewOn, true);
+  r.rememberRegionPreview(false);
+  assert.equal(r.getRegionEditorSession().previewOn, false);
+  r.resetRegionEditorSession();
+});
+check("preview: follows selected region while ON", () => {
+  const drafts = [R({ region_id: "a", x: 0.1 }), R({ region_id: "b", x: 0.5 })];
+  const payloadA = r.regionPreviewPayload(drafts, "a");
+  const payloadB = r.regionPreviewPayload(drafts, "b");
+  assert.equal(payloadA[0].selected, true);
+  assert.equal(payloadB[1].selected, true);
+  assert.equal(payloadB[1].x, 0.5);
+});
+check("preview: dropdown selection does not toggle preview", () => {
+  // The dropdown handlers only select/load; they never call setPreviewOn.
+  const selectProfile = regionComponentSrc.slice(
+    regionComponentSrc.indexOf("const selectProfile"),
+    regionComponentSrc.indexOf("const addProfile"),
+  );
+  const selectRegion = regionComponentSrc.slice(
+    regionComponentSrc.indexOf("const selectRegion"),
+    regionComponentSrc.indexOf("const setPreviewOn"),
+  );
+  assert.equal(selectProfile.includes("setPreviewOn"), false);
+  assert.equal(selectRegion.includes("setPreviewOn"), false);
+});
 check("preview: no text input / editable names", () => {
   assert.equal(regionComponentSrc.includes('type="text"'), false);
   assert.equal(regionComponentSrc.includes("setRegionName"), false);

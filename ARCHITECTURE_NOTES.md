@@ -2481,6 +2481,32 @@ Status: LOCAL PASS / DEVICE TEST PENDING
   all backend/runtime invariants are unchanged. No
   localStorage/sessionStorage/backend persistence was added.
 
+## Phase 2P.1G — page + preview state stabilization
+
+Status: LOCAL PASS / DEVICE TEST PENDING
+
+- verified cause (code audit): the Decky `useQuickAccessVisible` signal was used
+  as a reset trigger for the active page, the Region editor session/draft, and
+  the preview. That signal reflects QAM window visibility and blips during
+  context-menu / preview-renderer activity, so it intermittently reset the page
+  to OCR (e.g. almost always on `Show Region Preview`, and occasionally on
+  Dropdown use). Device evidence matched the audit.
+- fix: all `useQuickAccessVisible`-driven resets were removed from `Content`
+  (`src/index.tsx`) and `RegionEditorSection` (`src/components/RegionEditor.tsx`).
+  The active page changes ONLY on explicit navigation (`goToPage` / `goPrev` /
+  `goNext` from header clicks and L1/R1) and Preview changes ONLY on explicit
+  Show/Hide. Page, draft, and preview state are module-level sessions that
+  survive transient remounts; Dropdown/context-menu/focus/remount/visibility
+  events never reset them.
+- deferred (per task): "fresh open always OCR" is no longer forced — the page may
+  persist across a QAM close within the plugin runtime. `onDismount` still resets
+  the page session for a genuine plugin reload. No `alwaysRender`, no visibility
+  timer, no Panel Opacity, no backend/runtime changes.
+- tests: harness updated to assert no visibility-driven reset and that only
+  explicit navigation changes the page; added preview-session/Show-Hide/
+  follow-selection guards. Shoulder navigation, Region draft semantics and all
+  backend/runtime invariants are unchanged.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

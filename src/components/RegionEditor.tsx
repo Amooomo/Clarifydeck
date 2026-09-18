@@ -4,7 +4,7 @@
 // changes apply on the next explicit OCR start.
 
 import { ButtonItem, Dropdown, PanelSection, PanelSectionRow } from "@decky/ui";
-import { callable, useQuickAccessVisible } from "@decky/api";
+import { callable } from "@decky/api";
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import {
   DEFAULT_PANEL_STYLE,
@@ -17,7 +17,6 @@ import {
   REGION_FONT_SIZE_STEP,
   canAddRegion,
   clampRegionFontSize,
-  clearRegionPreview,
   dropdownOptionValue,
   draftsForApply,
   getRegionEditorDraftState,
@@ -34,8 +33,6 @@ import {
   rememberRegionPreview,
   rememberRegionSelection,
   removeRegion,
-  resetRegionEditorDraftState,
-  resetRegionEditorSession,
   scopeAppId,
   setPrimaryRegion,
   setRegionEnabled,
@@ -73,7 +70,6 @@ type OverlayControlResult = { ok?: boolean; error?: string; detail?: string; sta
 // Python/X11 renderer; independent from the persistent text overlay.
 const setRegionPreviewEnabled = callable<[enabled: boolean], OverlayControlResult>("set_region_preview_enabled");
 const setRegionPreviewRegions = callable<[regions: RegionPreviewRegion[]], OverlayControlResult>("set_region_preview");
-const clearRegionPreviewRegions = callable<[], OverlayControlResult>("clear_region_preview");
 
 // Phase 2M.2A runtime-only per-region panel style. Not persisted.
 type PanelStyleResult = {
@@ -141,11 +137,7 @@ export function RegionEditorSection() {
     () => (resume ? initialDraft.fontByRegion : {}),
   );
   const mounted = useRef(true);
-  const previewOnRef = useRef(false);
   const selectedIdRef = useRef<string | null>(selectedId);
-  const qamVisible = useQuickAccessVisible();
-  const qamVisibleRef = useRef(qamVisible);
-  const prevQamVisibleRef = useRef(qamVisible);
 
   const selectRegion = (regionId: string | null) => {
     selectedIdRef.current = regionId;
@@ -245,10 +237,6 @@ export function RegionEditorSection() {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
 
-  useEffect(() => {
-    qamVisibleRef.current = qamVisible;
-  }, [qamVisible]);
-
   const selected = drafts.find((region) => region.region_id === selectedId) ?? null;
   const primaryId = primaryRegionId(drafts);
   const selectedStyle = (selectedId && styleByRegion[selectedId]) || DEFAULT_PANEL_STYLE;
@@ -338,9 +326,8 @@ export function RegionEditorSection() {
     setRegionPreview({ drafts, selectedId, primaryId });
   }, [drafts, selectedId, primaryId]);
 
-  // Explicit renderer preview lifecycle. Default OFF; QAM open never enables it.
+  // Explicit renderer preview lifecycle. Default OFF; only Show/Hide toggles it.
   useEffect(() => {
-    previewOnRef.current = previewOn;
     rememberRegionPreview(previewOn);
     void (async () => {
       try {
@@ -369,49 +356,11 @@ export function RegionEditorSection() {
     })();
   }, [previewOn, drafts, selectedId, primaryId]);
 
-  // Editor close. If the QAM is still visible this is a transient remount (e.g.
-  // a Dropdown context menu): keep the renderer preview and the editor session
-  // so Preview/selection survive. A genuine QAM close is handled below.
-  useEffect(
-    () => () => {
-      if (qamVisibleRef.current) {
-        return;
-      }
-      if (previewOnRef.current) {
-        void setRegionPreviewEnabled(false);
-        void clearRegionPreviewRegions();
-      }
-      clearRegionPreview();
-      resetRegionEditorSession();
-      resetRegionEditorDraftState();
-    },
-    [],
-  );
-
-  useEffect(() => {
-    const wasVisible = prevQamVisibleRef.current;
-    prevQamVisibleRef.current = qamVisible;
-    qamVisibleRef.current = qamVisible;
-    if (qamVisible) {
-      if (!wasVisible) {
-        // QAM reopened while this component stayed mounted: hydrate fresh.
-        void load();
-      }
-      return;
-    }
-    if (!wasVisible) {
-      // Initial render before visibility is reported: nothing to tear down.
-      return;
-    }
-    // QAM genuinely closed: clear the renderer preview and forget the session.
-    previewOnRef.current = false;
-    setPreviewOnState(false);
-    resetRegionEditorSession();
-    resetRegionEditorDraftState();
-    void setRegionPreviewEnabled(false);
-    void clearRegionPreviewRegions();
-    clearRegionPreview();
-  }, [qamVisible]);
+  // NOTE: there is intentionally NO unmount/QAM-visibility cleanup here. The
+  // preview session and editor drafts are module-level and survive transient
+  // remounts; Preview changes ONLY via explicit Show/Hide. The Decky visibility
+  // signal blips during context-menu/preview-renderer activity, so using it to
+  // reset state caused random page/preview resets on device.
 
   const addRegion = () => {
     if (!canAddRegion(drafts)) {
