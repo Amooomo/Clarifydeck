@@ -1,4 +1,4 @@
-// Phase 2L.7 — persistent multi-region Recognition Region editor.
+// Phase 2P.1 — production multi-region Recognition Region editor.
 // Uses the authoritative backend v2 region config; the backend remains the
 // source of truth. Saving never starts/stops/restarts OCR or the renderer, and
 // changes apply on the next explicit OCR start.
@@ -18,13 +18,11 @@ import {
   canAddRegion,
   clampRegionFontSize,
   clearRegionPreview,
-  describeSource,
   dropdownOptionValue,
   draftsForApply,
   getRegionEditorSession,
   isPanelStyle,
   isRegionFontSize,
-  moveRegion,
   newRegionDraft,
   nextSelectionAfterRemove,
   panelStyleLabel,
@@ -36,7 +34,7 @@ import {
   removeRegion,
   resetRegionEditorSession,
   scopeAppId,
-  scopeOptions,
+  setPrimaryRegion,
   setRegionEnabled,
   setRegionPreview,
   updateRegionGeometry,
@@ -48,7 +46,6 @@ import {
 
 const regionConfigGet = callable<[appId: string | null], RegionConfigPayload>("region_config_get");
 const regionConfigSet = callable<[regions: RegionDraft[], appId: string | null], RegionConfigPayload>("region_config_set");
-const regionConfigReset = callable<[appId: string | null], RegionConfigPayload>("region_config_reset");
 
 // Phase 2M.2C Region Profile ("Region Set") management. Each Region Set is an
 // independently persisted Region JSON file selected by stable profile_id.
@@ -173,7 +170,7 @@ export function RegionEditorSection() {
       const result = await regionConfigGet(scopeAppId("global", CURRENT_APP_ID));
       if (mounted.current) {
         applyPayload(result);
-        setError(result.ok === false ? describeSource(result.error) : "");
+        setError(result.ok === false ? result.error || result.detail || "Could not load regions" : "");
       }
     } catch (err) {
       if (mounted.current) {
@@ -302,29 +299,6 @@ export function RegionEditorSection() {
     })();
   };
 
-  // Explicit persistence: never auto-saved on style/font changes.
-  const saveAppearance = async () => {
-    if (!selectedId) {
-      return;
-    }
-    setBusy(true);
-    setError("");
-    try {
-      const result = await regionAppearanceSave(selectedId);
-      if (mounted.current && result && result.ok === false) {
-        setError(result.detail || result.error || "Save appearance failed");
-      }
-    } catch (err) {
-      if (mounted.current) {
-        setError(`Save appearance failed: ${String(err)}`);
-      }
-    } finally {
-      if (mounted.current) {
-        setBusy(false);
-      }
-    }
-  };
-
   // In-QAM draft preview store (also feeds the renderer preview below).
   useEffect(() => {
     setRegionPreview({ drafts, selectedId, primaryId });
@@ -345,7 +319,7 @@ export function RegionEditorSection() {
     })();
   }, [previewOn]);
 
-  // Push live draft geometry to the renderer preview (no Apply required).
+  // Push live draft geometry to the renderer preview (no save required).
   useEffect(() => {
     if (!previewOn) {
       return;
@@ -415,6 +389,15 @@ export function RegionEditorSection() {
     }
     selectRegion(nextSelectionAfterRemove(drafts, selectedIdRef.current ?? selected.region_id));
     setDrafts((current) => removeRegion(current, selected.region_id));
+  };
+
+  // Reorder the selected enabled region to the first enabled slot (Primary).
+  // Disabled regions are never silently enabled; already-primary is a no-op.
+  const setPrimary = () => {
+    if (!selected) {
+      return;
+    }
+    setDrafts((current) => setPrimaryRegion(current, selected.region_id));
   };
 
   // Region Set (profile) operations persist immediately. They never start or
@@ -500,7 +483,10 @@ export function RegionEditorSection() {
     }
   };
 
-  const apply = async () => {
+  // One explicit production save: region drafts + the selected region's
+  // appearance. Never starts/stops/restarts OCR or the renderer. A partial
+  // failure is surfaced, not swallowed.
+  const saveChanges = async () => {
     const message = validateRegions(drafts);
     if (message) {
       setError(message);
@@ -510,11 +496,16 @@ export function RegionEditorSection() {
     setError("");
     try {
       const result = await regionConfigSet(draftsForApply(drafts, configured), scopeAppId("global", CURRENT_APP_ID));
-      if (mounted.current) {
-        if (result.ok === false) {
-          setError(result.detail || result.error || "Save failed");
-        } else {
-          applyPayload(result);
+      if (result.ok === false) {
+        setError(result.detail || result.error || "Save failed");
+        return;
+      }
+      applyPayload(result);
+      if (selectedId) {
+        const appearance = await regionAppearanceSave(selectedId);
+        if (appearance && appearance.ok === false) {
+          setError(appearance.detail || appearance.error || "Save appearance failed");
+          return;
         }
       }
     } catch (err) {
@@ -528,26 +519,6 @@ export function RegionEditorSection() {
     }
   };
 
-  const reset = async () => {
-    setBusy(true);
-    setError("");
-    try {
-      const result = await regionConfigReset(scopeAppId("global", CURRENT_APP_ID));
-      if (mounted.current) {
-        applyPayload(result);
-      }
-    } catch (err) {
-      if (mounted.current) {
-        setError(`Reset failed: ${String(err)}`);
-      }
-    } finally {
-      if (mounted.current) {
-        setBusy(false);
-      }
-    }
-  };
-
-  const scopes = scopeOptions(CURRENT_APP_ID !== null);
   const profileOptions = useMemo(
     () => profiles.map((profile) => ({ data: profile.profile_id, label: profile.label })),
     [profiles],
@@ -561,24 +532,13 @@ export function RegionEditorSection() {
     [drafts, primaryId],
   );
 
+  const selectedIsPrimary = !!selected && selected.region_id === primaryId;
+  const primaryDisabled = !selected || !selected.enabled || selectedIsPrimary || busy;
+
   return (
-    <PanelSection title="Recognition Regions">
+    <PanelSection title="Regions">
       <PanelSectionRow>
-        <div style={statusStyle}>
-          <div>Scope: Global</div>
-          <div>Source: {describeSource(config?.source)}</div>
-          {!configured ? (
-            <div style={hintStyle}>
-              No saved regions for this scope yet; showing the effective regions. Applying will save
-              them here.
-            </div>
-          ) : null}
-          {scopes[1].disabled ? <div style={hintStyle}>This Game editing is unavailable here.</div> : null}
-          <div>First enabled region is the Primary region shown in the overlay.</div>
-        </div>
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <div style={hintStyle}>Region Set</div>
+        <div style={sectionHeadingStyle}>PROFILE</div>
       </PanelSectionRow>
       <PanelSectionRow>
         <div style={selectorRowStyle}>
@@ -609,7 +569,7 @@ export function RegionEditorSection() {
         </div>
       </PanelSectionRow>
       <PanelSectionRow>
-        <div style={hintStyle}>Region</div>
+        <div style={sectionHeadingStyle}>REGION</div>
       </PanelSectionRow>
       <PanelSectionRow>
         <div style={selectorRowStyle}>
@@ -646,29 +606,13 @@ export function RegionEditorSection() {
       ) : null}
       <PanelSectionRow>
         <div style={rowActionsStyle}>
-          <ButtonItem
-            layout="below"
-            disabled={!selected || busy}
-            onClick={() => selected && setDrafts((current) => moveRegion(current, selected.region_id, -1))}
-          >
-            Move up
+          <ButtonItem layout="below" disabled={primaryDisabled} onClick={setPrimary}>
+            {selectedIsPrimary ? "Primary Region" : "Set as Primary"}
           </ButtonItem>
-          <ButtonItem
-            layout="below"
-            disabled={!selected || busy}
-            onClick={() => selected && setDrafts((current) => moveRegion(current, selected.region_id, 1))}
-          >
-            Move down
+          <ButtonItem layout="below" disabled={busy} onClick={() => setPreviewOn(!previewOn)}>
+            {previewOn ? "[x] Show Region Preview" : "[ ] Show Region Preview"}
           </ButtonItem>
         </div>
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ButtonItem layout="below" disabled={busy} onClick={() => setPreviewOn(!previewOn)}>
-          {previewOn ? "[x] Show Region Preview" : "[ ] Show Region Preview"}
-        </ButtonItem>
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <div style={hintStyle}>Shows recognition boxes over the game while editing.</div>
       </PanelSectionRow>
       {selected ? (
         <>
@@ -682,6 +626,9 @@ export function RegionEditorSection() {
             >
               {selected.enabled ? "[x] Enabled" : "[ ] Enabled"}
             </ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <div style={sectionHeadingStyle}>AREA (% OF SCREEN)</div>
           </PanelSectionRow>
           <GeometrySlider
             label="X%"
@@ -720,7 +667,7 @@ export function RegionEditorSection() {
             }
           />
           <PanelSectionRow>
-            <div style={hintStyle}>Text panel style</div>
+            <div style={sectionHeadingStyle}>APPEARANCE</div>
           </PanelSectionRow>
           <PanelSectionRow>
             <div style={rowActionsStyle}>
@@ -753,27 +700,12 @@ export function RegionEditorSection() {
             value={selectedFontSize}
             onChange={changeFontSize}
           />
-          <PanelSectionRow>
-            <ButtonItem layout="below" disabled={busy} onClick={() => void saveAppearance()}>
-              Save appearance
-            </ButtonItem>
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <div style={hintStyle}>
-              Saves this Region's panel style and text size so they survive a restart.
-            </div>
-          </PanelSectionRow>
         </>
       ) : null}
       <PanelSectionRow>
-        <div style={rowActionsStyle}>
-          <ButtonItem layout="below" disabled={busy} onClick={apply}>
-            Apply
-          </ButtonItem>
-          <ButtonItem layout="below" disabled={busy} onClick={reset}>
-            Reset
-          </ButtonItem>
-        </div>
+        <ButtonItem layout="below" disabled={busy} onClick={() => void saveChanges()}>
+          Save Changes
+        </ButtonItem>
       </PanelSectionRow>
       <PanelSectionRow>
         <div style={statusStyle}>
@@ -857,6 +789,13 @@ const statusStyle: CSSProperties = {
   fontSize: "12px",
   gap: "4px",
   lineHeight: 1.35,
+};
+
+const sectionHeadingStyle: CSSProperties = {
+  color: "#9fb3c8",
+  fontSize: "11px",
+  fontWeight: 700,
+  letterSpacing: "0.08em",
 };
 
 const errorStyle: CSSProperties = {

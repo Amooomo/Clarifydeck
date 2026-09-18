@@ -122,6 +122,26 @@ export function moveRegion(regions: RegionDraft[], regionId: string, delta: numb
   return next;
 }
 
+// Primary is defined by the backend as "the first enabled region in order".
+// "Set as Primary" reorders the selected enabled region to the first enabled
+// slot while preserving the relative order of every other region. It never
+// silently enables a disabled region, and it is a no-op for an unknown id or an
+// already-primary selection. Persistence stays in the explicit Save Changes flow.
+export function setPrimaryRegion(regions: RegionDraft[], regionId: string): RegionDraft[] {
+  const index = regions.findIndex((region) => region.region_id === regionId);
+  if (index < 0) {
+    return regions;
+  }
+  if (!regions[index].enabled) {
+    return regions;
+  }
+  const firstEnabled = regions.findIndex((region) => region.enabled);
+  if (firstEnabled < 0 || firstEnabled === index) {
+    return regions;
+  }
+  return moveRegion(regions, regionId, firstEnabled - index);
+}
+
 export function nextSelectionAfterRemove(regions: RegionDraft[], removedId: string): string | null {
   const index = regions.findIndex((region) => region.region_id === removedId);
   if (index < 0) {
@@ -132,13 +152,6 @@ export function nextSelectionAfterRemove(regions: RegionDraft[], removedId: stri
     return null;
   }
   return (remaining[Math.min(index, remaining.length - 1)] ?? remaining[0]).region_id;
-}
-
-export function scopeOptions(appIdAvailable: boolean): { value: string; label: string; disabled: boolean }[] {
-  return [
-    { value: "global", label: "Global", disabled: false },
-    { value: "per_game", label: "This Game", disabled: !appIdAvailable },
-  ];
 }
 
 export function scopeAppId(scope: string, appId: string | null): string | null {
@@ -153,21 +166,6 @@ export function draftsForApply(regions: RegionDraft[], configured: boolean): Reg
     const existing = configured && region.region_id && !region.region_id.startsWith(NEW_REGION_PREFIX);
     return existing ? region : { ...region, region_id: "" };
   });
-}
-
-export function describeSource(source?: string | null): string {
-  switch (source) {
-    case "per_game":
-      return "This Game regions";
-    case "global":
-      return "Global regions";
-    case "legacy":
-      return "Imported single region";
-    case "builtin":
-      return "Default region";
-    default:
-      return "Unknown";
-  }
 }
 
 // Steam Deck QAM text entry is impractical, so labels are order-derived

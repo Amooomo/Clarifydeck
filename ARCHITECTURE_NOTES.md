@@ -2378,6 +2378,36 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
   synthetic tree. No runtime behavior, capture, OCR, stabilizer, Fast Accept,
   renderer or UI change.
 
+## Phase 2P.1 — QAM production UI (two pages)
+
+Status: LOCAL PASS / DEVICE TEST PENDING
+
+- the QAM now has two pages: **OCR** (default) and **Regions**, switched with
+  the native Steam/Decky `Tabs` component (L1/R1). A compact tappable page
+  header is rendered only if the native tab component is unavailable; no global
+  controller hook is installed and the tab state is local to the QAM content.
+- Page 1: production OCR worker control (`start_ocr_worker(false)` /
+  `stop_ocr_worker` / `get_ocr_worker_status`, explicit-only, never on mount or
+  QAM open) plus the persistent overlay control (`get_status` /
+  `set_overlay_enabled`). The old `start_plugin`/`stop_plugin` capture control,
+  change-gate toggle, Stable Text/transport/session/PID diagnostics, Tesseract
+  language/tuning controls, legacy ROI editor and legacy BoxState editor were
+  removed from the visible UI. Backend RPCs and pipelines are unchanged.
+- Page 2: the authoritative v2 Recognition Region/Profile editor, trimmed of
+  developer metadata. `Move up`/`Move down` are replaced by `Set as Primary`
+  (reorders the selected enabled region to the first enabled slot, never enables
+  a disabled region, no-op when already primary), `Apply`+`Save appearance`+
+  `Reset` become one `Save Changes` (region drafts via `region_config_set`, then
+  the selected region's appearance via `region_appearance_save`; partial failure
+  surfaced), and the compact 30×30 `+`/`-` buttons and their semantics are
+  unchanged.
+- pure helper `setPrimaryRegion` added to `src/regionEditor.ts`; frontend-only
+  dead code removed (`src/ocrDiagnostic.ts` and `src/components/OCRDiagnostic.tsx`
+  replaced by `src/ocrControl.ts` and `src/components/OCRControl.tsx`). No
+  backend, capture, OCR, stabilizer, Fast Accept, renderer, transport or
+  packaging-allowlist changes.
+- harness updated to the production UI (`scripts/test_frontend_ocr_diagnostic.mjs`).
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so
