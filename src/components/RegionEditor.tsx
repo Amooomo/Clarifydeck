@@ -7,24 +7,31 @@ import { ButtonItem, Dropdown, PanelSection, PanelSectionRow } from "@decky/ui";
 import { callable } from "@decky/api";
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import {
+  DEFAULT_PANEL_OPACITY,
   DEFAULT_PANEL_STYLE,
   DEFAULT_REGION_FONT_SIZE,
+  MAX_PANEL_OPACITY,
   MAX_REGIONS,
   MAX_REGION_FONT_SIZE,
+  MIN_PANEL_OPACITY,
   MIN_REGION_FONT_SIZE,
+  PANEL_OPACITY_STEP,
   PANEL_STYLE_BLACK_ON_WHITE,
   PANEL_STYLE_WHITE_ON_BLACK,
   REGION_FONT_SIZE_STEP,
   canAddRegion,
+  clampPanelOpacity,
   clampRegionFontSize,
   dropdownOptionValue,
   draftsForApply,
   getRegionEditorDraftState,
   getRegionEditorSession,
+  isPanelOpacity,
   isPanelStyle,
   isRegionFontSize,
   newRegionDraft,
   nextSelectionAfterRemove,
+  panelOpacityPercent,
   panelStyleLabel,
   primaryRegionId,
   regionLabel,
@@ -95,6 +102,19 @@ type FontSizeResult = {
 const regionFontSizeGet = callable<[regionId: string], FontSizeResult>("region_font_size_get");
 const regionFontSizeSet = callable<[regionId: string, fontSize: number], FontSizeResult>("region_font_size_set");
 
+// Phase 2P.1I runtime per-region panel opacity (persisted with appearance).
+type PanelOpacityResult = {
+  ok?: boolean;
+  error?: string;
+  detail?: string;
+  region_id?: string;
+  panel_opacity?: number;
+};
+const regionPanelOpacityGet = callable<[regionId: string], PanelOpacityResult>("region_panel_opacity_get");
+const regionPanelOpacitySet = callable<[regionId: string, panelOpacity: number], PanelOpacityResult>(
+  "region_panel_opacity_set",
+);
+
 // Phase 2M.2D explicit persistence of the selected region's style + font size.
 type AppearanceSaveResult = {
   ok?: boolean;
@@ -103,6 +123,7 @@ type AppearanceSaveResult = {
   region_id?: string;
   style?: string;
   font_size?: number;
+  panel_opacity?: number;
 };
 const regionAppearanceSave = callable<[regionId: string], AppearanceSaveResult>("region_appearance_save");
 
@@ -140,6 +161,9 @@ export function RegionEditorSection() {
   );
   const [fontByRegion, setFontByRegion] = useState<Record<string, number>>(
     () => (resume ? initialDraft.fontByRegion : {}),
+  );
+  const [opacityByRegion, setOpacityByRegion] = useState<Record<string, number>>(
+    () => (resume ? initialDraft.opacityByRegion : {}),
   );
   const mounted = useRef(true);
   const selectedIdRef = useRef<string | null>(selectedId);
@@ -247,6 +271,7 @@ export function RegionEditorSection() {
       drafts,
       styleByRegion,
       fontByRegion,
+      opacityByRegion,
     });
   }, [
     activeProfileId,
@@ -257,6 +282,7 @@ export function RegionEditorSection() {
     drafts,
     styleByRegion,
     fontByRegion,
+    opacityByRegion,
   ]);
 
   useEffect(() => {
@@ -267,6 +293,12 @@ export function RegionEditorSection() {
   const primaryId = primaryRegionId(drafts);
   const selectedStyle = (selectedId && styleByRegion[selectedId]) || DEFAULT_PANEL_STYLE;
   const selectedFontSize = (selectedId && fontByRegion[selectedId]) || DEFAULT_REGION_FONT_SIZE;
+  // 0.0 is a valid opacity, so this must NOT use `|| DEFAULT` (which would turn
+  // 0% into 65%).
+  const selectedOpacity =
+    selectedId && opacityByRegion[selectedId] !== undefined
+      ? opacityByRegion[selectedId]
+      : DEFAULT_PANEL_OPACITY;
 
   // Load the selected region's runtime panel style (session-only, no persistence).
   useEffect(() => {
@@ -342,6 +374,48 @@ export function RegionEditorSection() {
       } catch (err) {
         if (mounted.current) {
           setError(`Text size failed: ${String(err)}`);
+        }
+      }
+    })();
+  };
+
+  // Load the selected region's runtime panel opacity (session-only until Save).
+  useEffect(() => {
+    if (!selectedId) {
+      return;
+    }
+    void (async () => {
+      try {
+        const result = await regionPanelOpacityGet(selectedId);
+        if (mounted.current && result && result.ok !== false) {
+          const opacity = isPanelOpacity(result.panel_opacity)
+            ? (result.panel_opacity as number)
+            : DEFAULT_PANEL_OPACITY;
+          setOpacityByRegion((current) => ({ ...current, [selectedId]: opacity }));
+        }
+      } catch (err) {
+        if (mounted.current) {
+          setError(`Panel opacity failed: ${String(err)}`);
+        }
+      }
+    })();
+  }, [selectedId]);
+
+  const changePanelOpacity = (value: number) => {
+    if (!selectedId) {
+      return;
+    }
+    const opacity = clampPanelOpacity(value);
+    setOpacityByRegion((current) => ({ ...current, [selectedId]: opacity }));
+    void (async () => {
+      try {
+        const result = await regionPanelOpacitySet(selectedId, opacity);
+        if (mounted.current && result && result.ok === false) {
+          setError(result.detail || result.error || "Panel opacity failed");
+        }
+      } catch (err) {
+        if (mounted.current) {
+          setError(`Panel opacity failed: ${String(err)}`);
         }
       }
     })();
@@ -694,6 +768,9 @@ export function RegionEditorSection() {
             <div style={sectionHeadingStyle}>APPEARANCE</div>
           </PanelSectionRow>
           <PanelSectionRow>
+            <div style={hintStyle}>Panel</div>
+          </PanelSectionRow>
+          <PanelSectionRow>
             <div style={rowActionsStyle}>
               <ButtonItem
                 layout="below"
@@ -713,11 +790,17 @@ export function RegionEditorSection() {
               </ButtonItem>
             </div>
           </PanelSectionRow>
-          <PanelSectionRow>
-            <div style={hintStyle}>Text size</div>
-          </PanelSectionRow>
-          <GeometrySlider
-            label="Size"
+          <StackedSlider
+            label="Panel Opacity"
+            min={Math.round(MIN_PANEL_OPACITY * 100)}
+            max={Math.round(MAX_PANEL_OPACITY * 100)}
+            step={Math.round(PANEL_OPACITY_STEP * 100)}
+            suffix="%"
+            value={panelOpacityPercent(selectedOpacity)}
+            onChange={(value) => changePanelOpacity(value / 100)}
+          />
+          <StackedSlider
+            label="Text Size"
             min={MIN_REGION_FONT_SIZE}
             max={MAX_REGION_FONT_SIZE}
             step={REGION_FONT_SIZE_STEP}
@@ -769,6 +852,44 @@ function GeometrySlider({ label, min, max, value, onChange, step }: GeometrySlid
         />
         <span style={sliderValueStyle}>{value}</span>
       </label>
+    </PanelSectionRow>
+  );
+}
+
+// QAM-friendly two-row setting: label + value on the first row, a full-width
+// slider on the second. This avoids the label/value/slider overlap that a
+// single-row grid produces at narrow Steam Deck QAM widths.
+type StackedSliderProps = {
+  label: string;
+  min: number;
+  max: number;
+  value: number;
+  onChange: (value: number) => void;
+  step?: number;
+  suffix?: string;
+};
+
+function StackedSlider({ label, min, max, value, onChange, step, suffix }: StackedSliderProps) {
+  return (
+    <PanelSectionRow>
+      <div style={stackedSliderStyle}>
+        <div style={stackedHeaderStyle}>
+          <span style={stackedTitleStyle}>{label}</span>
+          <span style={stackedValueStyle}>
+            {value}
+            {suffix ?? ""}
+          </span>
+        </div>
+        <input
+          max={max}
+          min={min}
+          onChange={(event) => onChange(Number(event.currentTarget.value))}
+          step={step}
+          style={stackedRangeStyle}
+          type="range"
+          value={value}
+        />
+      </div>
     </PanelSectionRow>
   );
 }
@@ -855,4 +976,34 @@ const sliderValueStyle: CSSProperties = {
   color: "#d7f3ff",
   fontVariantNumeric: "tabular-nums",
   textAlign: "right",
+};
+
+const stackedSliderStyle: CSSProperties = {
+  display: "grid",
+  gap: "6px",
+  width: "100%",
+};
+
+const stackedHeaderStyle: CSSProperties = {
+  alignItems: "baseline",
+  display: "flex",
+  justifyContent: "space-between",
+  width: "100%",
+};
+
+const stackedTitleStyle: CSSProperties = {
+  color: "#f5f5f5",
+  fontWeight: 700,
+};
+
+const stackedValueStyle: CSSProperties = {
+  color: "#d7f3ff",
+  fontVariantNumeric: "tabular-nums",
+  textAlign: "right",
+};
+
+const stackedRangeStyle: CSSProperties = {
+  accentColor: "#67d4ff",
+  display: "block",
+  width: "100%",
 };

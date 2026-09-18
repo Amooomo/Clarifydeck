@@ -73,8 +73,14 @@ class PresentationStoreTest(unittest.TestCase):
             encoding="utf-8",
         )
         store = pres.PresentationStore(self.path)
-        self.assertEqual(store.get("A"), {"style": "white_on_black", "font_size": 16})
-        self.assertEqual(store.get("B"), {"style": "black_on_white", "font_size": 30})
+        self.assertEqual(
+            store.get("A"),
+            {"style": "white_on_black", "font_size": 16, "panel_opacity": 0.65},
+        )
+        self.assertEqual(
+            store.get("B"),
+            {"style": "black_on_white", "font_size": 30, "panel_opacity": 0.65},
+        )
 
     def test_p3_style_round_trip(self) -> None:
         store = pres.PresentationStore(self.path)
@@ -101,7 +107,7 @@ class PresentationStoreTest(unittest.TestCase):
         store.save()
         self.assertEqual(
             pres.PresentationStore(self.path).get("A"),
-            {"style": "black_on_white", "font_size": 32},
+            {"style": "black_on_white", "font_size": 32, "panel_opacity": 0.65},
         )
 
     def test_p6_save_a_preserves_b(self) -> None:
@@ -113,8 +119,14 @@ class PresentationStoreTest(unittest.TestCase):
         store.update("A", protocol.STYLE_BLACK_ON_WHITE, 40)
         store.save()
         reloaded = pres.PresentationStore(self.path)
-        self.assertEqual(reloaded.get("A"), {"style": "black_on_white", "font_size": 40})
-        self.assertEqual(reloaded.get("B"), {"style": "black_on_white", "font_size": 30})
+        self.assertEqual(
+            reloaded.get("A"),
+            {"style": "black_on_white", "font_size": 40, "panel_opacity": 0.65},
+        )
+        self.assertEqual(
+            reloaded.get("B"),
+            {"style": "black_on_white", "font_size": 30, "panel_opacity": 0.65},
+        )
 
     def test_p7_orphan_entry_preserved(self) -> None:
         self.path.write_text(
@@ -125,8 +137,14 @@ class PresentationStoreTest(unittest.TestCase):
         store.update("A", protocol.STYLE_WHITE_ON_BLACK, 20)
         store.save()
         reloaded = pres.PresentationStore(self.path)
-        self.assertEqual(reloaded.get("ORPHAN"), {"style": "black_on_white", "font_size": 44})
-        self.assertEqual(reloaded.get("A"), {"style": "white_on_black", "font_size": 20})
+        self.assertEqual(
+            reloaded.get("ORPHAN"),
+            {"style": "black_on_white", "font_size": 44, "panel_opacity": 0.65},
+        )
+        self.assertEqual(
+            reloaded.get("A"),
+            {"style": "white_on_black", "font_size": 20, "panel_opacity": 0.65},
+        )
 
     def test_p9_corrupt_json_safe_and_preserved(self) -> None:
         self.path.write_text("{not json", encoding="utf-8")
@@ -164,7 +182,10 @@ class PresentationStoreTest(unittest.TestCase):
             encoding="utf-8",
         )
         store = pres.PresentationStore(self.path)
-        self.assertEqual(store.get("GOOD"), {"style": "white_on_black", "font_size": 20})
+        self.assertEqual(
+            store.get("GOOD"),
+            {"style": "white_on_black", "font_size": 20, "panel_opacity": 0.65},
+        )
         self.assertIsNone(store.get("BAD"))
 
     def test_p14_atomic_write_no_temp(self) -> None:
@@ -236,7 +257,10 @@ class ManagerPresentationTest(unittest.TestCase):
         result = asyncio.run(manager.save_region_appearance("A"))
         self.assertTrue(result["ok"])
         reloaded = pres.PresentationStore(self.path)
-        self.assertEqual(reloaded.get("A"), {"style": "black_on_white", "font_size": 30})
+        self.assertEqual(
+            reloaded.get("A"),
+            {"style": "black_on_white", "font_size": 30, "panel_opacity": 0.65},
+        )
         self.assertIsNone(reloaded.get("B"))
 
     def test_save_preserves_other_entries(self) -> None:
@@ -247,7 +271,10 @@ class ManagerPresentationTest(unittest.TestCase):
         asyncio.run(manager.set_region_font_size("A", 16))
         asyncio.run(manager.save_region_appearance("A"))
         reloaded = pres.PresentationStore(self.path)
-        self.assertEqual(reloaded.get("B"), {"style": "black_on_white", "font_size": 30})
+        self.assertEqual(
+            reloaded.get("B"),
+            {"style": "black_on_white", "font_size": 30, "panel_opacity": 0.65},
+        )
         self.assertEqual(reloaded.get("A")["font_size"], 16)
 
     def test_save_without_path_unavailable(self) -> None:
@@ -317,7 +344,10 @@ class EngineAppearanceRpcTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(self.engine.presentation_path().is_file())
         payload = json.loads(self.engine.presentation_path().read_text(encoding="utf-8"))
-        self.assertEqual(payload["regions"]["A"], {"style": "black_on_white", "font_size": 30})
+        self.assertEqual(
+            payload["regions"]["A"],
+            {"style": "black_on_white", "font_size": 30, "panel_opacity": 0.65},
+        )
 
     def test_engine_save_without_overlay(self) -> None:
         result = asyncio.run(self.engine.region_appearance_save("A"))
@@ -334,6 +364,181 @@ class EngineAppearanceRpcTest(unittest.TestCase):
             asyncio.run(self.engine.region_panel_style_get("A"))["style"], "black_on_white"
         )
         self.assertIsNone(self.engine._ocr_worker)
+
+
+class PanelOpacitySemanticsTest(unittest.TestCase):
+    """Phase 2P.1I: panel opacity == background alpha; 0.0 is valid."""
+
+    def test_default_is_legacy_panel_alpha(self) -> None:
+        self.assertEqual(protocol.DEFAULT_PANEL_OPACITY, 0.65)
+        self.assertEqual(protocol.DEFAULT_PANEL_OPACITY, protocol.PANEL_ALPHA)
+
+    def test_sanitize_valid_percentages(self) -> None:
+        for value, expected in (
+            (0.0, 0.0),
+            (0.05, 0.05),
+            (0.25, 0.25),
+            (0.5, 0.5),
+            (0.65, 0.65),
+            (1.0, 1.0),
+            (0, 0.0),
+            (1, 1.0),
+        ):
+            self.assertEqual(protocol.sanitize_panel_opacity(value), expected, value)
+
+    def test_zero_is_not_missing(self) -> None:
+        self.assertEqual(protocol.sanitize_panel_opacity(0.0), 0.0)
+        self.assertIsNotNone(protocol.sanitize_panel_opacity(0.0))
+
+    def test_malformed_returns_none(self) -> None:
+        for bad in (None, "", "0.5", True, False, [], {}, float("nan"), float("inf")):
+            self.assertIsNone(protocol.sanitize_panel_opacity(bad), bad)
+
+    def test_out_of_range_clamped(self) -> None:
+        self.assertEqual(protocol.sanitize_panel_opacity(-1.0), 0.0)
+        self.assertEqual(protocol.sanitize_panel_opacity(2.0), 1.0)
+
+    def test_style_colors_absolute_alpha_dark(self) -> None:
+        for opacity in (0.0, 0.25, 0.5, 0.65, 1.0):
+            text, panel = protocol.style_colors(protocol.STYLE_WHITE_ON_BLACK, opacity)
+            self.assertEqual(panel, (0.0, 0.0, 0.0, opacity))
+            self.assertEqual(text, (1.0, 1.0, 1.0, 1.0))
+
+    def test_style_colors_absolute_alpha_light(self) -> None:
+        for opacity in (0.0, 0.25, 0.5, 0.65, 1.0):
+            text, panel = protocol.style_colors(protocol.STYLE_BLACK_ON_WHITE, opacity)
+            self.assertEqual(panel, (1.0, 1.0, 1.0, opacity))
+            self.assertEqual(text, (0.0, 0.0, 0.0, 1.0))
+
+    def test_style_colors_missing_or_malformed_uses_default(self) -> None:
+        for bad in (None, "x", True, float("nan")):
+            _text, panel = protocol.style_colors(protocol.STYLE_WHITE_ON_BLACK, bad)
+            self.assertEqual(panel[3], 0.65)
+        _text, panel = protocol.style_colors(protocol.STYLE_WHITE_ON_BLACK)
+        self.assertEqual(panel[3], 0.65)
+
+    def test_style_colors_zero_not_multiplied(self) -> None:
+        _text, panel = protocol.style_colors(protocol.STYLE_WHITE_ON_BLACK, 0.0)
+        self.assertEqual(panel[3], 0.0)
+
+
+class PresentationPanelOpacityTest(unittest.TestCase):
+    """Phase 2P.1I: opacity persistence + legacy default."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "overlay_presentation.json"
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_legacy_entry_defaults_to_065(self) -> None:
+        self.path.write_text(
+            _doc({"A": {"style": "white_on_black", "font_size": 20}}), encoding="utf-8"
+        )
+        self.assertEqual(pres.PresentationStore(self.path).get("A")["panel_opacity"], 0.65)
+
+    def test_malformed_opacity_defaults_to_065(self) -> None:
+        self.path.write_text(
+            _doc({"A": {"style": "white_on_black", "font_size": 20, "panel_opacity": "x"}}),
+            encoding="utf-8",
+        )
+        self.assertEqual(pres.PresentationStore(self.path).get("A")["panel_opacity"], 0.65)
+
+    def test_zero_opacity_preserved_on_load(self) -> None:
+        self.path.write_text(
+            _doc({"A": {"style": "white_on_black", "font_size": 20, "panel_opacity": 0.0}}),
+            encoding="utf-8",
+        )
+        self.assertEqual(pres.PresentationStore(self.path).get("A")["panel_opacity"], 0.0)
+
+    def test_opacity_round_trip_all_values(self) -> None:
+        values = {"a": 0.0, "b": 0.05, "c": 0.25, "d": 0.5, "e": 0.65, "f": 1.0}
+        store = pres.PresentationStore(self.path)
+        for rid, value in values.items():
+            store.update(rid, protocol.STYLE_WHITE_ON_BLACK, 20, value)
+        store.save()
+        reloaded = pres.PresentationStore(self.path)
+        for rid, value in values.items():
+            self.assertEqual(reloaded.get(rid)["panel_opacity"], value, rid)
+
+
+class ManagerPanelOpacityTest(unittest.TestCase):
+    """Phase 2P.1I: per-Region runtime opacity + save integration."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "overlay_presentation.json"
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _manager(self) -> OverlayManager:
+        return OverlayManager(presentation_path=self.path)
+
+    def test_new_region_defaults_to_065(self) -> None:
+        manager = self._manager()
+        self.assertEqual(
+            asyncio.run(manager.get_region_panel_opacity("NEW_ID"))["panel_opacity"], 0.65
+        )
+
+    def test_zero_opacity_remains_zero(self) -> None:
+        manager = self._manager()
+        asyncio.run(manager.set_region_panel_opacity("A", 0.0))
+        self.assertEqual(asyncio.run(manager.get_region_panel_opacity("A"))["panel_opacity"], 0.0)
+
+    def test_per_region_independent(self) -> None:
+        manager = self._manager()
+        asyncio.run(manager.set_region_panel_opacity("A", 0.3))
+        asyncio.run(manager.set_region_panel_opacity("B", 0.8))
+        self.assertEqual(asyncio.run(manager.get_region_panel_opacity("A"))["panel_opacity"], 0.3)
+        self.assertEqual(asyncio.run(manager.get_region_panel_opacity("B"))["panel_opacity"], 0.8)
+
+    def test_malformed_rejected_preserves_previous(self) -> None:
+        manager = self._manager()
+        asyncio.run(manager.set_region_panel_opacity("A", 0.3))
+        bad = asyncio.run(manager.set_region_panel_opacity("A", "nope"))
+        self.assertFalse(bad["ok"])
+        self.assertEqual(bad["error"], "invalid_panel_opacity")
+        self.assertEqual(asyncio.run(manager.get_region_panel_opacity("A"))["panel_opacity"], 0.3)
+
+    def test_save_persists_opacity(self) -> None:
+        manager = self._manager()
+        asyncio.run(manager.set_region_panel_style("A", "black_on_white"))
+        asyncio.run(manager.set_region_font_size("A", 30))
+        asyncio.run(manager.set_region_panel_opacity("A", 0.3))
+        result = asyncio.run(manager.save_region_appearance("A"))
+        self.assertTrue(result["ok"])
+        reloaded = pres.PresentationStore(self.path)
+        self.assertEqual(reloaded.get("A")["panel_opacity"], 0.3)
+
+    def test_save_zero_opacity_persists(self) -> None:
+        manager = self._manager()
+        asyncio.run(manager.set_region_panel_opacity("A", 0.0))
+        asyncio.run(manager.save_region_appearance("A"))
+        reloaded = pres.PresentationStore(self.path)
+        self.assertEqual(reloaded.get("A")["panel_opacity"], 0.0)
+
+    def test_restore_on_init(self) -> None:
+        store = pres.PresentationStore(self.path)
+        store.update("A", protocol.STYLE_WHITE_ON_BLACK, 20, 0.25)
+        store.update("B", protocol.STYLE_WHITE_ON_BLACK, 20, 0.8)
+        store.save()
+        manager = self._manager()
+        self.assertEqual(asyncio.run(manager.get_region_panel_opacity("A"))["panel_opacity"], 0.25)
+        self.assertEqual(asyncio.run(manager.get_region_panel_opacity("B"))["panel_opacity"], 0.8)
+
+    def test_set_region_text_carries_opacity(self) -> None:
+        manager = self._manager()
+        asyncio.run(manager.set_region_panel_opacity("A", 0.3))
+        asyncio.run(manager.set_region_text("A", (0.1, 0.1, 0.2, 0.2), "hi"))
+        self.assertEqual(manager._region_text["A"]["panel_opacity"], 0.3)
+
+    def test_opacity_change_does_not_start_renderer(self) -> None:
+        manager = self._manager()
+        asyncio.run(manager.set_region_panel_opacity("A", 0.3))
+        self.assertEqual(manager.status()["state"], "DISABLED")
+        self.assertIsNone(manager._proc)
 
 
 if __name__ == "__main__":

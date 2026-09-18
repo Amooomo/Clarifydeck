@@ -7,13 +7,15 @@ state.
 
 Schema v1::
 
-    {"version": 1, "regions": {"<region_id>": {"style": "white_on_black", "font_size": 20}}}
+    {"version": 1, "regions": {"<region_id>": {"style": "white_on_black", "font_size": 20, "panel_opacity": 0.65}}}
 
 Behavior:
 - missing file -> empty map (defaults), no file created on load;
 - corrupt JSON / unsupported version -> empty map + ``last_error`` (never
   overwritten on load, evidence preserved);
 - partially invalid entries -> valid entries load, invalid ones ignored;
+- entries without ``panel_opacity`` (legacy) load at the historical panel alpha
+  (0.65, backward compatible);
 - save is atomic (temp + fsync + ``os.replace``) and preserves every other
   entry, including entries for regions in inactive/deleted profiles (orphans).
 
@@ -35,7 +37,12 @@ MAX_PRESENTATION_BYTES = 256 * 1024
 
 
 def sanitize_presentation_entry(region_id: Any, entry: Any) -> Optional[dict[str, Any]]:
-    """Validate one region entry; return ``{"style", "font_size"}`` or None."""
+    """Validate one region entry; return ``{"style", "font_size", "panel_opacity"}``.
+
+    Older entries without ``panel_opacity`` load at the backward-compatible
+    historical default (0.65). A malformed opacity safely defaults to 0.65 rather
+    than dropping the whole entry. ``0.0`` is a valid opacity and is preserved.
+    """
     if not isinstance(region_id, str) or not region_id:
         return None
     if not isinstance(entry, Mapping):
@@ -44,7 +51,10 @@ def sanitize_presentation_entry(region_id: Any, entry: Any) -> Optional[dict[str
     font_size = protocol.sanitize_region_font_size(entry.get("font_size"))
     if style is None or font_size is None:
         return None
-    return {"style": style, "font_size": font_size}
+    panel_opacity = protocol.sanitize_panel_opacity(entry.get("panel_opacity"))
+    if panel_opacity is None:
+        panel_opacity = protocol.DEFAULT_PANEL_OPACITY
+    return {"style": style, "font_size": font_size, "panel_opacity": panel_opacity}
 
 
 def parse_presentation(data: Any) -> tuple[dict[str, dict[str, Any]], Optional[str]]:
@@ -125,9 +135,10 @@ class PresentationStore:
         entry = self._entries.get(key)
         return dict(entry) if entry is not None else None
 
-    def update(self, region_id: Any, style: Any, font_size: Any) -> bool:
+    def update(self, region_id: Any, style: Any, font_size: Any, panel_opacity: Any = None) -> bool:
         normalized = sanitize_presentation_entry(
-            region_id, {"style": style, "font_size": font_size}
+            region_id,
+            {"style": style, "font_size": font_size, "panel_opacity": panel_opacity},
         )
         if normalized is None:
             return False

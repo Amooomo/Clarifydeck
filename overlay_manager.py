@@ -202,7 +202,10 @@ class OverlayManager:
         self._region_style: dict = {}
         # Phase 2M.2B runtime-only per-region font size (never persisted).
         self._region_font_size: dict = {}
-        # Phase 2M.2D persisted per-region presentation (style + font_size).
+        # Phase 2P.1I per-region panel opacity (background alpha; persisted with
+        # the region presentation alongside style/font size).
+        self._region_panel_opacity: dict = {}
+        # Phase 2M.2D persisted per-region presentation (style + font_size + opacity).
         # Loading restores state only: it never starts OCR/renderer or replays text.
         self._presentation: Optional[presentation.PresentationStore] = None
         if presentation_path is not None:
@@ -210,6 +213,9 @@ class OverlayManager:
             for region_id, entry in self._presentation.entries().items():
                 self._region_style[region_id] = entry["style"]
                 self._region_font_size[region_id] = entry["font_size"]
+                self._region_panel_opacity[region_id] = entry.get(
+                    "panel_opacity", protocol.DEFAULT_PANEL_OPACITY
+                )
 
     # -- identity ----------------------------------------------------------
 
@@ -379,11 +385,13 @@ class OverlayManager:
             key = str(region_id)
             style = self._region_style.get(key, protocol.DEFAULT_STYLE)
             font_size = self._region_font_size.get(key, protocol.DEFAULT_REGION_FONT_SIZE)
+            panel_opacity = self._region_panel_opacity.get(key, protocol.DEFAULT_PANEL_OPACITY)
             self._region_text[key] = {
                 "rect": tuple(rect),
                 "text": text,
                 "style": style,
                 "font_size": font_size,
+                "panel_opacity": panel_opacity,
             }
             if self._text_enabled and self._state == OverlayState.RUNNING:
                 x, y, w, h = rect
@@ -394,6 +402,7 @@ class OverlayManager:
                     "text": text,
                     "style": style,
                     "font_size": font_size,
+                    "panel_opacity": panel_opacity,
                 }
                 # Phase 2N.3 optional diagnostic fields (renderer logs only).
                 if source_seq is not None:
@@ -472,12 +481,52 @@ class OverlayManager:
                 self._send({"type": "set_region_font_size", "region_id": key, "font_size": normalized})
             return {"ok": True, "region_id": key, "font_size": normalized}
 
+    async def get_region_panel_opacity(self, region_id: str) -> dict:
+        async with self._lock:
+            key = str(region_id) if region_id is not None else ""
+            return {
+                "ok": True,
+                "region_id": key,
+                "panel_opacity": self._region_panel_opacity.get(
+                    key, protocol.DEFAULT_PANEL_OPACITY
+                ),
+            }
+
+    async def set_region_panel_opacity(self, region_id: str, panel_opacity: Any) -> dict:
+        """Remember a region's runtime panel opacity; update a visible block live.
+
+        The value is the panel background alpha directly; text stays fully
+        opaque. Never starts/stops OCR or the renderer, never changes
+        geometry/style/font, and never creates an empty panel when no text block
+        exists for the region. ``0.0`` is a valid opacity.
+        """
+        async with self._lock:
+            key = str(region_id) if region_id is not None else ""
+            normalized = protocol.sanitize_panel_opacity(panel_opacity)
+            if not key or normalized is None:
+                return {
+                    "ok": False,
+                    "error": "invalid_panel_opacity",
+                    "region_id": key,
+                    "panel_opacity": self._region_panel_opacity.get(
+                        key, protocol.DEFAULT_PANEL_OPACITY
+                    ),
+                }
+            self._region_panel_opacity[key] = normalized
+            if self._state == OverlayState.RUNNING and key in self._region_text:
+                self._region_text[key]["panel_opacity"] = normalized
+                self._send(
+                    {"type": "set_region_panel_opacity", "region_id": key, "panel_opacity": normalized}
+                )
+            return {"ok": True, "region_id": key, "panel_opacity": normalized}
+
     async def save_region_appearance(self, region_id: str) -> dict:
-        """Persist the region's current runtime style + font size.
+        """Persist the region's current runtime style + font size + panel opacity.
 
         Saves only the target region and preserves every other entry (including
         regions in inactive/deleted profiles). Never starts/stops OCR or the
-        renderer, never changes geometry/style/font, and never creates a block.
+        renderer, never changes geometry/style/font/opacity, and never creates a
+        block.
         """
         async with self._lock:
             key = str(region_id) if region_id is not None else ""
@@ -487,13 +536,20 @@ class OverlayManager:
                 return {"ok": False, "error": "presentation_unavailable"}
             style = self._region_style.get(key, protocol.DEFAULT_STYLE)
             font_size = self._region_font_size.get(key, protocol.DEFAULT_REGION_FONT_SIZE)
-            if not self._presentation.update(key, style, font_size):
+            panel_opacity = self._region_panel_opacity.get(key, protocol.DEFAULT_PANEL_OPACITY)
+            if not self._presentation.update(key, style, font_size, panel_opacity):
                 return {"ok": False, "error": "invalid_appearance"}
             try:
                 self._presentation.save()
             except (OSError, ValueError) as exc:
                 return {"ok": False, "error": "presentation_write_failed", "detail": str(exc)}
-            return {"ok": True, "region_id": key, "style": style, "font_size": font_size}
+            return {
+                "ok": True,
+                "region_id": key,
+                "style": style,
+                "font_size": font_size,
+                "panel_opacity": panel_opacity,
+            }
 
     async def hide_region_text(self, region_id: str) -> dict:
         async with self._lock:

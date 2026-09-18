@@ -446,7 +446,9 @@ class OverlayRenderer:
                 or protocol.DEFAULT_REGION_FONT_SIZE
             )
             line_h = protocol.region_line_height(font_size)
-            text_rgba, panel_rgba = protocol.style_colors(block.get("style"))
+            text_rgba, panel_rgba = protocol.style_colors(
+                block.get("style"), block.get("panel_opacity")
+            )
             libcairo.cairo_save(self.cairo)
             libcairo.cairo_rectangle(self.cairo, left, top, width, height)
             libcairo.cairo_clip(self.cairo)
@@ -788,6 +790,14 @@ def serve(renderer: OverlayRenderer, sock_path: Path, parent_pid: int = 0) -> in
                                 protocol.sanitize_region_font_size(payload.get("font_size"))
                                 or protocol.DEFAULT_REGION_FONT_SIZE
                             )
+                            panel_opacity = protocol.sanitize_panel_opacity(
+                                payload.get("panel_opacity")
+                            )
+                            block["panel_opacity"] = (
+                                panel_opacity
+                                if panel_opacity is not None
+                                else protocol.DEFAULT_PANEL_OPACITY
+                            )
                             renderer.region_text[str(region_id)] = block
                             renderer.draw()
                             renderer.log_region_latency(
@@ -811,6 +821,16 @@ def serve(renderer: OverlayRenderer, sock_path: Path, parent_pid: int = 0) -> in
                         block = renderer.region_text.get(region_id)
                         if block is not None and font_size is not None:
                             block["font_size"] = font_size
+                            renderer.draw()
+                        continue
+                    if action == "set_region_panel_opacity":
+                        region_id = str(payload.get("region_id", ""))
+                        panel_opacity = protocol.sanitize_panel_opacity(
+                            payload.get("panel_opacity")
+                        )
+                        block = renderer.region_text.get(region_id)
+                        if block is not None and panel_opacity is not None:
+                            block["panel_opacity"] = panel_opacity
                             renderer.draw()
                         continue
                     if action == "hide_region_text":

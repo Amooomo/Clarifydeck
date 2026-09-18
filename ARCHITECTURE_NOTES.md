@@ -2535,6 +2535,43 @@ Status: LOCAL PASS / DEVICE TEST PENDING
 - no QAM lifecycle, navigation, Preview ownership, Panel Opacity or
   backend/runtime changes.
 
+## Phase 2P.1I — per-region panel opacity + stacked QAM sliders
+
+Status: LOCAL PASS / DEVICE TEST PENDING
+
+- one feature reintroduced: per-Region **Panel Opacity**, in
+  `Regions -> APPEARANCE`. No Display page; the two-page (OCR / Regions)
+  navigation is unchanged.
+- semantics: the UI percentage **is** the rendered panel background alpha
+  (`effective_alpha = panel_opacity`, never multiplied by another base alpha).
+  Dark = `rgba(0,0,0,alpha)`, Light = `rgba(255,255,255,alpha)`; text alpha stays
+  `1.0`, so text never fades. `protocol.style_colors(style, panel_opacity)` owns
+  this mapping and `renderer._draw_region_text_cairo` passes the block's value.
+- default / backward compatibility: `DEFAULT_PANEL_OPACITY = PANEL_ALPHA = 0.65`.
+  A legacy region entry without `panel_opacity` loads at 0.65; a malformed value
+  falls back to 0.65; a new Region defaults to 0.65. `0.0` is a **valid distinct
+  value** and is preserved end to end (no `value || 0.65` / `value or 0.65`
+  fallbacks anywhere; the TS editor uses `opacityByRegion[id] ?? DEFAULT`).
+- range/step: `0% .. 100%`, step `5%`, displayed as an integer percentage.
+- storage: per-Region, persisted through the existing appearance path.
+  `overlay/presentation.py` schema v1 entry gains `panel_opacity`; runtime
+  `OverlayManager._region_panel_opacity` mirrors style/font-size, and
+  `region_appearance_save(region_id)` writes it. New narrow RPCs
+  `region_panel_opacity_get/set` update a visible block live without starting or
+  restarting OCR/renderer.
+- UI: `Panel Opacity` and `Text Size` use a new `StackedSlider` — a label/value
+  row with a full-width range input on the row below — so the label/value/slider
+  can no longer overlap in the narrow QAM. Geometry sliders keep their existing
+  compact single-row grid.
+- frozen: profile selection state, QAM navigation (OCR/Regions, L1/R1,
+  `qamPages`), Preview ownership/lifecycle, OCR/PipeWire/capture/transport core
+  and the renderer architecture are unchanged. Panel opacity follows the active
+  Region under the existing Profile/draft session and is not coupled to Preview.
+- tests: `scripts/test_overlay_presentation.py` (semantics, legacy/malformed
+  defaults, 0.0 preservation, Dark/Light alpha + text alpha, per-Region,
+  save/restore) and `scripts/test_frontend_ocr_diagnostic.mjs` (pure opacity
+  helpers, 0% snap-back guard, session draft field, stacked layout guards).
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

@@ -34,6 +34,15 @@ MIN_REGION_FONT_SIZE = 14
 MAX_REGION_FONT_SIZE = 48
 REGION_FONT_SIZE_STEP = 2
 
+# Phase 2P.1I per-region panel opacity == the panel background alpha (0.0 .. 1.0).
+# The value is the alpha directly (never multiplied by another base alpha). The
+# default is the historical fixed panel alpha so legacy saved regions and newly
+# created regions keep the previous appearance. 0.0 is a valid, distinct value.
+DEFAULT_PANEL_OPACITY = PANEL_ALPHA
+MIN_PANEL_OPACITY = 0.0
+MAX_PANEL_OPACITY = 1.0
+PANEL_OPACITY_STEP = 0.05
+
 
 def runtime_dir() -> Path:
     override = os.environ.get("CLARIFYDECK_OVERLAY_RUNTIME_DIR")
@@ -171,15 +180,41 @@ def sanitize_region_style(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value in STYLES else None
 
 
-def style_colors(style: Any) -> tuple[tuple[float, float, float, float], tuple[float, float, float, float]]:
-    """Return ``(text_rgba, panel_rgba)`` for a style.
+def sanitize_panel_opacity(value: Any) -> Optional[float]:
+    """Validate a per-region panel opacity; return a clamped float or None.
 
-    Unknown/missing styles fall back to the default WHITE_ON_BLACK. The panel is
-    always drawn at the single fixed ``PANEL_ALPHA``.
+    Accepts a finite number (int/float, never bool) and clamps it to
+    ``MIN_PANEL_OPACITY .. MAX_PANEL_OPACITY``. ``0.0`` is a valid value and is
+    returned as-is. Non-numeric/NaN/Infinity -> None (caller applies the default).
     """
+    if isinstance(value, bool):
+        return None
+    if not isinstance(value, (int, float)):
+        return None
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        return None
+    return max(MIN_PANEL_OPACITY, min(MAX_PANEL_OPACITY, parsed))
+
+
+def style_colors(
+    style: Any, panel_opacity: Any = None
+) -> tuple[tuple[float, float, float, float], tuple[float, float, float, float]]:
+    """Return ``(text_rgba, panel_rgba)`` for a style and panel opacity.
+
+    ``panel_opacity`` is the panel background alpha directly (0.0 = fully
+    transparent, 1.0 = fully opaque). Unknown/missing styles fall back to the
+    default WHITE_ON_BLACK; a missing/invalid opacity falls back to
+    ``DEFAULT_PANEL_OPACITY`` (the historical 0.65 panel alpha). Text alpha is
+    always 1.0 so text stays fully opaque at any panel opacity.
+    """
+    opacity = sanitize_panel_opacity(panel_opacity)
+    if opacity is None:
+        opacity = DEFAULT_PANEL_OPACITY
+    alpha = max(0.0, min(1.0, opacity))
     if style == STYLE_BLACK_ON_WHITE:
-        return (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0, PANEL_ALPHA)
-    return (1.0, 1.0, 1.0, 1.0), (0.0, 0.0, 0.0, PANEL_ALPHA)
+        return (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0, alpha)
+    return (1.0, 1.0, 1.0, 1.0), (0.0, 0.0, 0.0, alpha)
 
 
 def sanitize_region_font_size(value: Any) -> Optional[int]:

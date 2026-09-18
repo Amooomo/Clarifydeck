@@ -401,6 +401,7 @@ check("session: region draft state round-trips", () => {
     drafts,
     styleByRegion: { a: "black_on_white" },
     fontByRegion: { a: 24 },
+    opacityByRegion: { a: 0.3 },
   });
   const restored = regionLogic.getRegionEditorDraftState();
   assert.equal(restored.active, true);
@@ -409,6 +410,7 @@ check("session: region draft state round-trips", () => {
   assert.equal(restored.drafts[0].y, 0.25);
   assert.equal(restored.styleByRegion.a, "black_on_white");
   assert.equal(restored.fontByRegion.a, 24);
+  assert.equal(restored.opacityByRegion.a, 0.3);
 });
 check("session: region draft state resets on close", () => {
   regionLogic.rememberRegionEditorDraftState({
@@ -420,12 +422,14 @@ check("session: region draft state resets on close", () => {
     drafts: [{ region_id: "a", x: 0.1, y: 0.1, w: 0.2, h: 0.2, enabled: true }],
     styleByRegion: {},
     fontByRegion: {},
+    opacityByRegion: { a: 0.0 },
   });
   regionLogic.resetRegionEditorDraftState();
   const reset = regionLogic.getRegionEditorDraftState();
   assert.equal(reset.active, false);
   assert.deepEqual(reset.drafts, []);
   assert.equal(reset.activeProfileId, null);
+  assert.deepEqual(reset.opacityByRegion, {});
 });
 check("session: region editor hydrates and persists draft state", () => {
   assert.ok(regionComponentSrc.includes("getRegionEditorDraftState()"));
@@ -885,6 +889,120 @@ check("preview: panel/font runtime helpers retained", () => {
   assert.equal(r.REGION_FONT_SIZE_STEP, 2);
   assert.equal(r.clampRegionFontSize(13), 14);
   assert.equal(r.clampRegionFontSize(49), 48);
+});
+
+// -- Phase 2P.1I per-region panel opacity -------------------------------------
+
+check("opacity: default is the historical 0.65", () => {
+  assert.equal(r.DEFAULT_PANEL_OPACITY, 0.65);
+  assert.equal(r.MIN_PANEL_OPACITY, 0.0);
+  assert.equal(r.MAX_PANEL_OPACITY, 1.0);
+  assert.equal(r.PANEL_OPACITY_STEP, 0.05);
+});
+check("opacity: 0.0 is a valid value (never treated as missing)", () => {
+  assert.equal(r.isPanelOpacity(0), true);
+  assert.equal(r.clampPanelOpacity(0), 0);
+  assert.equal(r.panelOpacityPercent(0), 0);
+  assert.equal(r.isPanelOpacity(0.0), true);
+});
+check("opacity: percentage mapping is truthful", () => {
+  assert.equal(r.panelOpacityPercent(0.0), 0);
+  assert.equal(r.panelOpacityPercent(0.05), 5);
+  assert.equal(r.panelOpacityPercent(0.25), 25);
+  assert.equal(r.panelOpacityPercent(0.5), 50);
+  assert.equal(r.panelOpacityPercent(0.65), 65);
+  assert.equal(r.panelOpacityPercent(1.0), 100);
+});
+check("opacity: clamp clamps range and defaults malformed", () => {
+  assert.equal(r.clampPanelOpacity(-1), 0);
+  assert.equal(r.clampPanelOpacity(2), 1);
+  assert.equal(r.clampPanelOpacity("x"), 0.65);
+  assert.equal(r.clampPanelOpacity(Number.NaN), 0.65);
+  assert.equal(r.isPanelOpacity("x"), false);
+  assert.equal(r.isPanelOpacity(Number.NaN), false);
+  assert.equal(r.isPanelOpacity(1.5), false);
+});
+check("opacity: draft state carries per-Region opacity (0 preserved)", () => {
+  r.resetRegionEditorDraftState();
+  r.rememberRegionEditorDraftState({
+    active: true,
+    activeProfileId: "p1",
+    draftsProfileId: "p1",
+    profiles: [],
+    maxProfiles: 8,
+    configured: true,
+    drafts: [],
+    styleByRegion: {},
+    fontByRegion: {},
+    opacityByRegion: { a: 0.0, b: 0.8 },
+  });
+  const state = r.getRegionEditorDraftState();
+  assert.equal(state.opacityByRegion.a, 0.0);
+  assert.equal(state.opacityByRegion.b, 0.8);
+  r.resetRegionEditorDraftState();
+  assert.deepEqual(r.getRegionEditorDraftState().opacityByRegion, {});
+});
+check("opacity: component declares the RPCs once", () => {
+  assert.equal(countOccurrences(regionComponentSrc, '"region_panel_opacity_get"'), 1);
+  assert.equal(countOccurrences(regionComponentSrc, '"region_panel_opacity_set"'), 1);
+});
+check("opacity: component never uses `|| DEFAULT_PANEL_OPACITY` (0 snap-back guard)", () => {
+  assert.equal(regionComponentSrc.includes("|| DEFAULT_PANEL_OPACITY"), false);
+  assert.ok(regionComponentSrc.includes("opacityByRegion[selectedId] !== undefined"));
+});
+check("opacity: component loads, edits, and saves per Region", () => {
+  assert.ok(regionComponentSrc.includes("regionPanelOpacityGet(selectedId)"));
+  assert.ok(regionComponentSrc.includes("regionPanelOpacitySet(selectedId, opacity)"));
+  assert.ok(regionComponentSrc.includes("changePanelOpacity"));
+  assert.ok(regionComponentSrc.includes("setOpacityByRegion("));
+});
+check("opacity: opacity draft is session-backed across remount", () => {
+  assert.ok(regionComponentSrc.includes("opacityByRegion"));
+  assert.ok(regionComponentSrc.includes("initialDraft.opacityByRegion"));
+  assert.equal(regionComponentSrc.includes("useQuickAccessVisible"), false);
+});
+
+// -- Phase 2P.1I stacked QAM slider layout -------------------------------------
+
+check("layout: Panel Opacity and Text Size use the stacked slider", () => {
+  assert.ok(regionComponentSrc.includes("function StackedSlider("));
+  assert.ok(regionComponentSrc.includes('label="Panel Opacity"'));
+  assert.ok(regionComponentSrc.includes('label="Text Size"'));
+  assert.equal(countOccurrences(regionComponentSrc, "<StackedSlider"), 2);
+  assert.equal(regionComponentSrc.includes('label="Size"'), false);
+});
+check("layout: stacked slider has a header row and a full-width range row", () => {
+  assert.ok(regionComponentSrc.includes("stackedSliderStyle"));
+  assert.ok(regionComponentSrc.includes("stackedHeaderStyle"));
+  assert.ok(regionComponentSrc.includes("stackedRangeStyle"));
+  // The range input is a direct child of the stacked grid, not a header column.
+  const stacked = regionComponentSrc.slice(
+    regionComponentSrc.indexOf("function StackedSlider("),
+    regionComponentSrc.indexOf("const rowActionsStyle"),
+  );
+  assert.ok(stacked.includes('type="range"'));
+  assert.ok(stacked.includes("stackedHeaderStyle"));
+  assert.ok(stacked.includes("stackedRangeStyle"));
+});
+check("layout: opacity slider is full-range with a percent value", () => {
+  assert.ok(regionComponentSrc.includes("panelOpacityPercent(selectedOpacity)"));
+  assert.ok(regionComponentSrc.includes('suffix="%"'));
+  assert.ok(regionComponentSrc.includes("Math.round(MIN_PANEL_OPACITY * 100)"));
+  assert.ok(regionComponentSrc.includes("Math.round(MAX_PANEL_OPACITY * 100)"));
+  assert.ok(regionComponentSrc.includes("Math.round(PANEL_OPACITY_STEP * 100)"));
+});
+check("layout: Panel Opacity label precedes its slider row", () => {
+  const heading = regionComponentSrc.indexOf("APPEARANCE");
+  const opacity = regionComponentSrc.indexOf('label="Panel Opacity"');
+  const textSize = regionComponentSrc.indexOf('label="Text Size"');
+  const save = regionComponentSrc.indexOf("Save Changes");
+  assert.ok(heading >= 0 && opacity > heading);
+  assert.ok(textSize > opacity);
+  assert.ok(save > textSize);
+});
+check("layout: geometry sliders remain on the single-row grid", () => {
+  assert.ok(regionComponentSrc.includes("function GeometrySlider("));
+  assert.equal(countOccurrences(regionComponentSrc, "<GeometrySlider"), 4);
 });
 
 if (process.exitCode) {

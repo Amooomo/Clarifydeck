@@ -295,6 +295,37 @@ export function clampRegionFontSize(value: unknown): number {
   return Math.min(MAX_REGION_FONT_SIZE, Math.max(MIN_REGION_FONT_SIZE, stepped));
 }
 
+// -- Phase 2P.1I per-region panel opacity (background alpha) ------------------
+// The value IS the panel background alpha: 1.0 = fully opaque, 0.0 = fully
+// transparent. Legacy/new regions default to 0.65, the historical ClarifyDeck
+// panel alpha. Text is never affected. 0.0 is a valid, distinct value and must
+// never be treated as "missing" (no `value || DEFAULT` fallbacks).
+
+export const DEFAULT_PANEL_OPACITY = 0.65;
+export const MIN_PANEL_OPACITY = 0.0;
+export const MAX_PANEL_OPACITY = 1.0;
+export const PANEL_OPACITY_STEP = 0.05;
+
+export function isPanelOpacity(value: unknown): boolean {
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= MIN_PANEL_OPACITY &&
+    value <= MAX_PANEL_OPACITY
+  );
+}
+
+export function clampPanelOpacity(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_PANEL_OPACITY;
+  }
+  return Math.min(MAX_PANEL_OPACITY, Math.max(MIN_PANEL_OPACITY, value));
+}
+
+export function panelOpacityPercent(value: unknown): number {
+  return Math.round(clampPanelOpacity(value) * 100);
+}
+
 // -- Phase 2M.2C.1 editor session + Dropdown value normalization ---------------
 // Steam's QAM content can remount while a Dropdown context menu is open. These
 // module-level values keep the editor's Region selection and Preview intent
@@ -345,6 +376,7 @@ export type RegionEditorDraftState = {
   drafts: RegionDraft[];
   styleByRegion: Record<string, string>;
   fontByRegion: Record<string, number>;
+  opacityByRegion: Record<string, number>;
 };
 
 const EMPTY_DRAFT_STATE: RegionEditorDraftState = {
@@ -357,6 +389,7 @@ const EMPTY_DRAFT_STATE: RegionEditorDraftState = {
   drafts: [],
   styleByRegion: {},
   fontByRegion: {},
+  opacityByRegion: {},
 };
 
 let draftState: RegionEditorDraftState = { ...EMPTY_DRAFT_STATE };

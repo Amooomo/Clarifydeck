@@ -37,6 +37,7 @@ except Exception:  # pragma: no cover - optional at import time
 
 _DEFAULT_PANEL_STYLE = getattr(overlay_protocol, "DEFAULT_STYLE", "white_on_black")
 _DEFAULT_REGION_FONT_SIZE = getattr(overlay_protocol, "DEFAULT_REGION_FONT_SIZE", 20)
+_DEFAULT_PANEL_OPACITY = getattr(overlay_protocol, "DEFAULT_PANEL_OPACITY", 0.65)
 
 try:
     from backend_leader import BackgroundLeaderLease, LeaderAcquireResult
@@ -723,7 +724,31 @@ class ClarifyDeckEngine:
             decky.logger.error(f"region font size set failed: {exc}")
             return {"ok": False, "error": "region_font_size_failed", "detail": str(exc)}
 
-    # -- Phase 2M.2D persisted per-region appearance (style + font size) ----
+    # -- Phase 2P.1I per-region panel opacity (persisted with appearance) ----
+
+    async def region_panel_opacity_get(self, region_id: str) -> dict[str, Any]:
+        if self._overlay is None:
+            return {
+                "ok": True,
+                "region_id": str(region_id),
+                "panel_opacity": _DEFAULT_PANEL_OPACITY,
+            }
+        try:
+            return await self._overlay.get_region_panel_opacity(region_id)
+        except Exception as exc:
+            decky.logger.error(f"region panel opacity get failed: {exc}")
+            return {"ok": False, "error": "region_panel_opacity_failed", "detail": str(exc)}
+
+    async def region_panel_opacity_set(self, region_id: str, panel_opacity: Any) -> dict[str, Any]:
+        if self._role != "leader" or self._overlay is None:
+            return {"ok": False, "error": "overlay_unavailable"}
+        try:
+            return await self._overlay.set_region_panel_opacity(region_id, panel_opacity)
+        except Exception as exc:
+            decky.logger.error(f"region panel opacity set failed: {exc}")
+            return {"ok": False, "error": "region_panel_opacity_failed", "detail": str(exc)}
+
+    # -- Phase 2M.2D persisted per-region appearance (style + font + opacity) ----
 
     async def region_appearance_save(self, region_id: str) -> dict[str, Any]:
         if self._role != "leader" or self._overlay is None:
@@ -1694,6 +1719,12 @@ class Plugin:
 
     async def region_font_size_set(self, region_id: str, font_size: int) -> dict[str, Any]:
         return await get_engine().region_font_size_set(region_id, font_size)
+
+    async def region_panel_opacity_get(self, region_id: str) -> dict[str, Any]:
+        return await get_engine().region_panel_opacity_get(region_id)
+
+    async def region_panel_opacity_set(self, region_id: str, panel_opacity: float) -> dict[str, Any]:
+        return await get_engine().region_panel_opacity_set(region_id, panel_opacity)
 
     async def region_appearance_save(self, region_id: str) -> dict[str, Any]:
         return await get_engine().region_appearance_save(region_id)
