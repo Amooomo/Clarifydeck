@@ -32,3 +32,33 @@ export function getNextPageIndex(index: number, pageCount: number): number {
   }
   return Math.min(pageCount - 1, clampPageIndex(index, pageCount) + 1);
 }
+
+// -- QAM page session ---------------------------------------------------------
+// Steam may transiently remount the plugin content (e.g. when a Dropdown
+// context menu opens/closes). The active page must survive that transient
+// remount but reset when the QAM genuinely closes. This mirrors the Region
+// editor draft-session lifetime (see `regionEditor.ts`). In-memory only: no
+// localStorage/sessionStorage/backend.
+
+let sessionActivePageId: string | null = null;
+
+export function getQamPageSession(): string | null {
+  return sessionActivePageId;
+}
+
+export function rememberQamPageSession(id: string): void {
+  sessionActivePageId = id;
+}
+
+export function resetQamPageSession(): void {
+  sessionActivePageId = null;
+}
+
+// Resolve a stored page id against the current page list, falling back to the
+// first page (OCR) for null/stale/unknown ids.
+export function resolveSessionPageId(pages: QamPage[], stored: string | null): string {
+  if (stored && pages.some((page) => page.id === stored)) {
+    return stored;
+  }
+  return pages[0]?.id ?? "";
+}

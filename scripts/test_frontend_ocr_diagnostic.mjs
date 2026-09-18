@@ -210,7 +210,8 @@ check("index: page state owned by ClarifyDeck (no Decky Tabs)", () => {
   assert.ok(indexSrc.includes("const PAGES: QamPage[]"));
   assert.ok(indexSrc.includes('{ id: "ocr", title: "OCR" }'));
   assert.ok(indexSrc.includes('{ id: "regions", title: "Regions" }'));
-  assert.ok(indexSrc.includes("const [activeId, setActiveId] = useState<string>(PAGE_OCR)"));
+  assert.ok(indexSrc.includes("const [activeId, setActiveId] = useState<string>(() =>"));
+  assert.ok(indexSrc.includes("resolveSessionPageId(PAGES, getQamPageSession())"));
   assert.equal(indexSrc.includes("from \"@decky/ui\""), true);
   assert.equal(/\bTabs\b/.test(indexSrc.replace(/\/\/.*$/gm, "")), false);
 });
@@ -317,6 +318,56 @@ check("pages: click and shoulder share one page index", () => {
   assert.equal(pages[clicked].id, "regions");
   assert.equal(pages[qamPages.getPreviousPageIndex(clicked, pages.length)].id, "ocr");
   assert.equal(pages[qamPages.getNextPageIndex(0, pages.length)].id, "regions");
+});
+
+// -- QAM page session (transient-remount lifetime) ----------------------------
+
+check("page session: fresh session defaults to OCR", () => {
+  qamPages.resetQamPageSession();
+  const pages = [P("ocr", "OCR"), P("regions", "Regions")];
+  assert.equal(qamPages.getQamPageSession(), null);
+  assert.equal(qamPages.resolveSessionPageId(pages, qamPages.getQamPageSession()), "ocr");
+});
+check("page session: switch to Regions is stored", () => {
+  qamPages.resetQamPageSession();
+  qamPages.rememberQamPageSession("regions");
+  assert.equal(qamPages.getQamPageSession(), "regions");
+});
+check("page session: transient remount restores Regions", () => {
+  const pages = [P("ocr", "OCR"), P("regions", "Regions")];
+  qamPages.resetQamPageSession();
+  qamPages.rememberQamPageSession("regions");
+  // Simulate the owner remounting: re-read the session for the initial state.
+  assert.equal(qamPages.resolveSessionPageId(pages, qamPages.getQamPageSession()), "regions");
+});
+check("page session: genuine close resets next open to OCR", () => {
+  const pages = [P("ocr", "OCR"), P("regions", "Regions")];
+  qamPages.rememberQamPageSession("regions");
+  qamPages.resetQamPageSession();
+  assert.equal(qamPages.resolveSessionPageId(pages, qamPages.getQamPageSession()), "ocr");
+});
+check("page session: stale/unknown id falls back to OCR", () => {
+  const pages = [P("ocr", "OCR"), P("regions", "Regions")];
+  assert.equal(qamPages.resolveSessionPageId(pages, "translate"), "ocr");
+  assert.equal(qamPages.resolveSessionPageId(pages, ""), "ocr");
+  qamPages.resetQamPageSession();
+});
+check("page session: index content is session-backed", () => {
+  assert.ok(indexSrc.includes("getQamPageSession()"));
+  assert.ok(indexSrc.includes("resolveSessionPageId(PAGES, getQamPageSession())"));
+  assert.ok(indexSrc.includes("rememberQamPageSession(activeId)"));
+  assert.ok(indexSrc.includes("resetQamPageSession()"));
+  assert.ok(indexSrc.includes("wasVisible && !qamVisible"));
+  assert.ok(indexSrc.includes("resetQamPageSession();") && indexSrc.includes("setActiveId(PAGE_OCR)"));
+});
+check("page session: reset on plugin dismount", () => {
+  const dismount = indexSrc.slice(indexSrc.indexOf("onDismount()"));
+  assert.ok(dismount.includes("resetQamPageSession()"));
+});
+check("page session: dropdown handlers never force a page", () => {
+  assert.equal(regionComponentSrc.includes("setActiveId"), false);
+  assert.equal(regionComponentSrc.includes("goToPage"), false);
+  assert.equal(regionComponentSrc.includes("rememberQamPageSession"), false);
 });
 
 // -- region draft session lifetime --------------------------------------------

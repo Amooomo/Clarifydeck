@@ -2456,6 +2456,31 @@ Status: LOCAL PASS / DEVICE TEST PENDING
 - the Phase 2P.1B region draft session, preview, profile/region persistence and
   all backend/runtime invariants are unchanged.
 
+## Phase 2P.1D — QAM page session across transient remounts
+
+Status: LOCAL PASS / DEVICE TEST PENDING
+
+- diagnosis (code evidence; device logs not captured in this environment):
+  `activeId` was local `useState`, no code path reset it to OCR, and the only
+  remaining explanation for a Dropdown selection returning to OCR is a transient
+  remount of the ClarifyDeck content owner when the Dropdown context menu
+  opens/closes. The Region editor already needed a remount-surviving draft
+  session for the same reason, which is consistent with the observed device
+  behavior (drafts survive; page resets).
+- fix: a small in-memory `qamPages` page session (`getQamPageSession`,
+  `rememberQamPageSession`, `resetQamPageSession`, `resolveSessionPageId`).
+  `Content` initializes `activeId` from the session (falling back to OCR for
+  null/stale ids), persists on change, and resets on a genuine QAM close
+  (`useQuickAccessVisible` true->false) and on plugin dismount. This mirrors the
+  Region editor draft-session lifetime, so the ClarifyDeck QAM session now has
+  one coherent lifetime: active page + Region editor draft.
+- `useQuickAccessVisible` tracks the QAM window `visibilitychange`, not
+  Dropdown/ContextMenu focus, so opening a Dropdown does not trigger the reset.
+- no per-Dropdown `setActivePage("regions")` hacks; Profile/Region handlers do
+  not touch page state. Shoulder navigation, Region draft session, preview and
+  all backend/runtime invariants are unchanged. No
+  localStorage/sessionStorage/backend persistence was added.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

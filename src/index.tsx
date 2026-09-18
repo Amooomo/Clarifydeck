@@ -15,7 +15,11 @@ import { RegionEditorSection } from "./components/RegionEditor";
 import {
   getNextPageIndex,
   getPreviousPageIndex,
+  getQamPageSession,
   pageIndexById,
+  rememberQamPageSession,
+  resetQamPageSession,
+  resolveSessionPageId,
   type QamPage,
 } from "./qamPages";
 import {
@@ -79,7 +83,28 @@ function PageHeader({
 }
 
 function Content() {
-  const [activeId, setActiveId] = useState<string>(PAGE_OCR);
+  // Active page is session-backed so it survives transient remounts within one
+  // open QAM (e.g. Dropdown context menus), while a genuine QAM close resets it
+  // to OCR. Mirrors the Region editor draft-session lifetime.
+  const qamVisible = useQuickAccessVisible();
+  const prevQamVisible = useRef(qamVisible);
+  const [activeId, setActiveId] = useState<string>(() =>
+    resolveSessionPageId(PAGES, getQamPageSession()),
+  );
+
+  useEffect(() => {
+    rememberQamPageSession(activeId);
+  }, [activeId]);
+
+  useEffect(() => {
+    const wasVisible = prevQamVisible.current;
+    prevQamVisible.current = qamVisible;
+    if (wasVisible && !qamVisible) {
+      // Genuine QAM close: next open starts on OCR again.
+      resetQamPageSession();
+      setActiveId(PAGE_OCR);
+    }
+  }, [qamVisible]);
 
   const goToPage = useCallback((id: string) => {
     setActiveId((current) => (PAGES.some((page) => page.id === id) ? id : current));
@@ -464,6 +489,7 @@ export default definePlugin(() => {
     content: <Content />,
     icon: <FaSearchPlus />,
     onDismount() {
+      resetQamPageSession();
       disposeOverlay();
       console.log("ClarifyDeck unloaded");
     },
