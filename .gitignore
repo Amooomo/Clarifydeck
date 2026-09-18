@@ -67,3 +67,16 @@ scripts/overlay_poc/overlay_poc
 # Phase 2F.1 offline OCR runtime bundle (large build artifact; manifest kept)
 runtime/ocr/site-packages/
 runtime/ocr/wheels/
+
+# Phase 2O.1 development caches / local test output (never ship)
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
