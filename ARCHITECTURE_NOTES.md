@@ -2314,6 +2314,35 @@ Status: LOCAL PASS / DEVICE RETEST PENDING
   sync=false`); GstApp and XDG-runtime hotfixes retained; no
   architecture/OCR/renderer/UI/default-backend changes.
 
+## Phase 2N.7 — PipeWire production default
+
+Status: LOCAL PASS / DEVICE RETEST PENDING
+
+- frozen previous checkpoint: `phase-2n6-device-pass`
+  (`b7f82ca1ffa21d39e3b3e2f81152d0a1023a7108`), Phase 2N.6 Gamescope PipeWire
+  capture DEVICE PASS.
+- production capture default is now **Gamescope PipeWire via GStreamer
+  appsink**; with no selector the worker resolves PipeWire automatically.
+- legacy/diagnostic capture: `ScreenshotCaptureBackend` (Gamescope screenshot),
+  retained for explicit developer diagnostics, regression comparison and
+  emergency compatibility. Selected only via
+  `CLARIFYDECK_CAPTURE_BACKEND=screenshot` or `--capture-backend screenshot`.
+- automatic fallback: none. A PipeWire startup/runtime failure surfaces the
+  existing structured `CaptureError` (`pipewire_unavailable`,
+  `pipewire_runtime_env_unavailable`, `pipewire_stream_error`,
+  `pipewire_map_failed`, …) and never starts screenshot capture.
+- normal-user systemd modification: none. Normal-user backend environment
+  variable: none. The OCR worker derives its own `XDG_RUNTIME_DIR` from
+  `os.geteuid()` (Phase 2N.6.2) and does not require any service override.
+- selector precedence is unchanged: explicit CLI `--capture-backend` overrides
+  the env var; the env var overrides the default; invalid values raise
+  `invalid_capture_backend`.
+- `CaptureProducer` -> backend interface -> `PipeWireCaptureBackend` /
+  `ScreenshotCaptureBackend` remains the only backend branching; no
+  OCR/ROI/multi-region/stabilizer/Fast-Accept/renderer/delivery/UI changes.
+- historical notes above are preserved; the screenshot path is not rewritten out
+  of the record.
+
 ## Phase 2C.2 Wayland environment
 
 - The live Decky backend (frozen loader) may not inherit `XDG_RUNTIME_DIR`, so

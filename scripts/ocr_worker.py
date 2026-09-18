@@ -93,7 +93,7 @@ def _parse_args(argv=None) -> argparse.Namespace:
         "--capture-backend",
         default=None,
         choices=("screenshot", "pipewire"),
-        help="capture frame source (default: CLARIFYDECK_CAPTURE_BACKEND or screenshot)",
+        help="capture frame source (default: pipewire; screenshot is explicit diagnostic only)",
     )
     parser.add_argument("--min-line-confidence", type=float, default=0.70)
     parser.add_argument("--consensus-required", type=int, default=2)

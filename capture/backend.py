@@ -1,16 +1,17 @@
-"""Capture backend abstraction + prototype selector (Phase 2N.6).
+"""Capture backend abstraction + production selector (Phase 2N.7).
 
 Two interchangeable frame sources feed the existing capture producer/OCR
 pipeline:
 
-- ``ScreenshotCaptureBackend`` wraps the validated Gamescope screenshot path
-  (default, unchanged);
-- ``PipeWireCaptureBackend`` streams the Gamescope PipeWire node through
-  GStreamer and converts NV12 to RGBA in memory.
+- ``PipeWireCaptureBackend`` (production default) streams the Gamescope PipeWire
+  node through GStreamer and converts NV12 to RGBA in memory;
+- ``ScreenshotCaptureBackend`` wraps the legacy Gamescope screenshot path and is
+  retained only as an explicit developer/diagnostic/compatibility backend.
 
-Selection is development/runtime only via ``CLARIFYDECK_CAPTURE_BACKEND``
-(default ``screenshot``); there is no QAM UI and no persistence. An active
-PipeWire session never falls back to screenshots.
+Selection: no selector -> PipeWire; ``CLARIFYDECK_CAPTURE_BACKEND=screenshot``
+(or ``--capture-backend screenshot``) explicitly selects the screenshot backend.
+There is no QAM UI, no persistence, and **no automatic fallback**: a PipeWire
+failure surfaces as a structured error and never starts screenshot capture.
 """
 
 from __future__ import annotations
@@ -35,27 +36,36 @@ from .pipewire_capture import (
 )
 
 CAPTURE_BACKEND_ENV = "CLARIFYDECK_CAPTURE_BACKEND"
-DEFAULT_CAPTURE_BACKEND = "screenshot"
+SCREENSHOT_BACKEND = "screenshot"
 PIPEWIRE_BACKEND = "pipewire"
+# Phase 2N.7: PipeWire is the production default; screenshot is explicit-only.
+DEFAULT_CAPTURE_BACKEND = PIPEWIRE_BACKEND
 
-_SCREENSHOT_ALIASES = {"", "screenshot", "gamescope", "gamescope_control"}
+_SCREENSHOT_ALIASES = {"screenshot", "gamescope", "gamescope_control"}
 _PIPEWIRE_ALIASES = {"pipewire", "pipewire-gst", "pipewire_gst", "gst"}
 
 
 def normalize_backend_name(value: Optional[str]) -> str:
-    """Map an explicit/env selector to ``screenshot`` or ``pipewire``."""
-    name = (value or "").strip().lower()
-    if name in _SCREENSHOT_ALIASES:
+    """Map an explicit/env selector to ``pipewire`` or ``screenshot``.
+
+    ``None``/empty means "no selector" and resolves to the production default.
+    """
+    if value is None:
         return DEFAULT_CAPTURE_BACKEND
+    name = str(value).strip().lower()
+    if not name:
+        return DEFAULT_CAPTURE_BACKEND
+    if name in _SCREENSHOT_ALIASES:
+        return SCREENSHOT_BACKEND
     if name in _PIPEWIRE_ALIASES:
         return PIPEWIRE_BACKEND
-    raise CaptureError("invalid_capture_backend", value or "")
+    raise CaptureError("invalid_capture_backend", value)
 
 
 class ScreenshotCaptureBackend:
-    """Default backend: the existing, unchanged Gamescope screenshot capture."""
+    """Legacy Gamescope screenshot capture; explicit diagnostic/compatibility only."""
 
-    name = DEFAULT_CAPTURE_BACKEND
+    name = SCREENSHOT_BACKEND
 
     def __init__(
         self,
@@ -316,9 +326,9 @@ def resolve_capture_backend(
     env=None,
     **kwargs,
 ):
-    """Select the capture backend (explicit name overrides env; default screenshot)."""
+    """Select the capture backend (explicit name overrides env; default PipeWire)."""
     environment = os.environ if env is None else env
     selected = normalize_backend_name(name if name is not None else environment.get(CAPTURE_BACKEND_ENV))
-    if selected == PIPEWIRE_BACKEND:
-        return PipeWireCaptureBackend(logger=logger, **kwargs)
-    return ScreenshotCaptureBackend(logger=logger, **kwargs)
+    if selected == SCREENSHOT_BACKEND:
+        return ScreenshotCaptureBackend(logger=logger, **kwargs)
+    return PipeWireCaptureBackend(logger=logger, **kwargs)

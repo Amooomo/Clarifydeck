@@ -102,17 +102,65 @@ class FakeAdapter:
 
 
 class BackendSelectionTest(unittest.TestCase):
-    def test_default_is_screenshot(self) -> None:
-        self.assertEqual(normalize_backend_name(None), "screenshot")
-        self.assertIsInstance(resolve_capture_backend(None, env={}), ScreenshotCaptureBackend)
+    def test_default_is_pipewire(self) -> None:
+        self.assertEqual(normalize_backend_name(None), "pipewire")
+        self.assertEqual(normalize_backend_name(""), "pipewire")
+        self.assertIsInstance(resolve_capture_backend(None, env={}), PipeWireCaptureBackend)
 
     def test_env_selects_pipewire(self) -> None:
         env = {CAPTURE_BACKEND_ENV: "pipewire"}
         self.assertIsInstance(resolve_capture_backend(None, env=env), PipeWireCaptureBackend)
 
-    def test_explicit_overrides_env(self) -> None:
+    def test_env_selects_screenshot(self) -> None:
+        env = {CAPTURE_BACKEND_ENV: "screenshot"}
+        self.assertIsInstance(resolve_capture_backend(None, env=env), ScreenshotCaptureBackend)
+
+    def test_explicit_pipewire_overrides_env_screenshot(self) -> None:
+        env = {CAPTURE_BACKEND_ENV: "screenshot"}
+        self.assertIsInstance(resolve_capture_backend("pipewire", env=env), PipeWireCaptureBackend)
+
+    def test_explicit_screenshot_overrides_env_pipewire(self) -> None:
         env = {CAPTURE_BACKEND_ENV: "pipewire"}
         self.assertIsInstance(resolve_capture_backend("screenshot", env=env), ScreenshotCaptureBackend)
+
+    def test_no_selector_does_not_instantiate_screenshot(self) -> None:
+        calls: list = []
+        original = backend_mod.ScreenshotCaptureBackend
+
+        class Spy(original):
+            def __init__(self, *args, **kwargs):
+                calls.append(1)
+                super().__init__(*args, **kwargs)
+
+        backend_mod.ScreenshotCaptureBackend = Spy
+        try:
+            backend = resolve_capture_backend(None, env={})
+        finally:
+            backend_mod.ScreenshotCaptureBackend = original
+        self.assertEqual(calls, [])
+        self.assertIsInstance(backend, PipeWireCaptureBackend)
+
+    def test_failed_pipewire_does_not_instantiate_screenshot(self) -> None:
+        calls: list = []
+        original = backend_mod.ScreenshotCaptureBackend
+
+        class Spy(original):
+            def __init__(self, *args, **kwargs):
+                calls.append(1)
+                super().__init__(*args, **kwargs)
+
+        backend_mod.ScreenshotCaptureBackend = Spy
+        try:
+            backend = resolve_capture_backend(None, env={})
+            # Inject a failing adapter and force startup failure.
+            backend._adapter = FakeAdapter(fail_attempts=999)
+            backend._owns_adapter = False
+            backend._retry_window = 0.0
+            with self.assertRaises(CaptureError):
+                backend.start()
+        finally:
+            backend_mod.ScreenshotCaptureBackend = original
+        self.assertEqual(calls, [])
 
     def test_aliases(self) -> None:
         self.assertEqual(normalize_backend_name("gamescope"), "screenshot")
@@ -886,6 +934,19 @@ class RuntimeEnvTest(unittest.TestCase):
         self.assertEqual(OCRWorkerManager._resolve_capture_backend("pipewire"), "pipewire")
         self.assertEqual(OCRWorkerManager._resolve_capture_backend("screenshot"), "screenshot")
         self.assertIsNone(OCRWorkerManager._resolve_capture_backend("bogus"))
+
+    def test_normal_start_does_not_require_backend_flag(self) -> None:
+        from backend.ocr_worker import OCRWorkerManager
+
+        previous = os.environ.pop(CAPTURE_BACKEND_ENV, None)
+        try:
+            # Manager omits the flag when no override exists...
+            self.assertIsNone(OCRWorkerManager._resolve_capture_backend(None))
+        finally:
+            if previous is not None:
+                os.environ[CAPTURE_BACKEND_ENV] = previous
+        # ...and the worker resolves the production default internally.
+        self.assertIsInstance(resolve_capture_backend(None, env={}), PipeWireCaptureBackend)
 
 
 class ManagerJournalMirrorTest(unittest.TestCase):

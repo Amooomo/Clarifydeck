@@ -1213,7 +1213,7 @@ def main(argv=None) -> int:
         "--capture-backend",
         default=None,
         choices=("screenshot", "pipewire"),
-        help="capture frame source (default: CLARIFYDECK_CAPTURE_BACKEND or screenshot)",
+        help="capture frame source (default: pipewire; screenshot is explicit diagnostic only)",
     )
     parser.add_argument("--change-gate", action="store_true", help="skip OCR when the ROI is unchanged")
     parser.add_argument("--force-ocr-interval-sec", type=float, default=3.0)
